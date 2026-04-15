@@ -1,4 +1,8 @@
 {
+  "vi": {
+    "label": "Tiếng Việt",
+    "llmInstruction": "Vui lòng trả lời bằng tiếng Việt."
+  },
   "zh": {
     "label": "中文",
     "llmInstruction": "请使用中文回答。"
@@ -26,9 +30,5 @@
   "de": {
     "label": "Deutsch",
     "llmInstruction": "Bitte antworten Sie auf Deutsch."
-  },
-  "vi": {
-    "label": "Tiếng Việt",
-    "llmInstruction": "Vui lòng trả lời bằng tiếng Việt."
   }
 }
