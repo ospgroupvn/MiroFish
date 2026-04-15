@@ -17,7 +17,38 @@ from ..config import Config
 from ..models.task import TaskManager, TaskStatus
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
 from .text_processor import TextProcessor
+from .node_classifier import NodeClassifier
+from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
 from ..utils.locale import t, get_locale, set_locale
+from ..utils.logger import get_logger
+from ..models.project import ProjectManager
+
+logger = get_logger('mirofish.graph_builder')
+
+
+def _retry_zep_call(func, operation_name, max_retries=3, initial_delay=2.0):
+    """
+    Helper: Gọi Zep API với retry mechanism
+    """
+    last_exception = None
+    delay = initial_delay
+
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries - 1:
+                logger.warning(
+                    f"Zep {operation_name} lần {attempt + 1} thất bại: {str(e)[:100]}, "
+                    f"thử lại sau {delay:.1f}s..."
+                )
+                time.sleep(delay)
+                delay *= 2  # exponential backoff
+            else:
+                logger.error(f"Zep {operation_name} thất bại sau {max_retries} lần thử: {str(e)}")
+
+    raise last_exception
 
 
 @dataclass
@@ -159,16 +190,32 @@ class GraphBuilderService:
                 progress=60,
                 message=t('progress.waitingZepProcess')
             )
-            
+
             self._wait_for_episodes(
                 episode_uuids,
                 lambda msg, prog: self.task_manager.update_task(
                     task_id,
-                    progress=60 + int(prog * 0.3),  # 60-90%
+                    progress=60 + int(prog * 0.15),  # 60-75%
                     message=msg
                 )
             )
-            
+
+            # 5.5. 使用LLM分类nodes
+            self.task_manager.update_task(
+                task_id,
+                progress=75,
+                message=t('progress.classifyingNodes')
+            )
+
+            classifications = self._classify_nodes(
+                graph_id, ontology,
+                lambda msg, prog: self.task_manager.update_task(
+                    task_id,
+                    progress=75 + int(prog * 0.15),  # 75-90%
+                    message=msg
+                )
+            )
+
             # 6. 获取图谱信息
             self.task_manager.update_task(
                 task_id,
@@ -284,12 +331,25 @@ class GraphBuilderService:
                 edge_definitions[name] = (edge_class, source_targets)
         
         # 调用Zep API设置本体
+        logger.info(f"正在为图谱 {graph_id} 设置本体，包含 {len(entity_types)} 个实体类型和 {len(edge_definitions)} 个边类型...")
+
         if entity_types or edge_definitions:
-            self.client.graph.set_ontology(
-                graph_ids=[graph_id],
-                entities=entity_types if entity_types else None,
-                edges=edge_definitions if edge_definitions else None,
-            )
+            try:
+                # 总是传递字典（可能为空），而不是 None
+                # Zep SDK 需要 entities 和 edges 参数为非 None 值
+                self.client.graph.set_ontology(
+                    graph_ids=[graph_id],
+                    entities=entity_types if entity_types else {},
+                    edges=edge_definitions if edge_definitions else {},
+                )
+                logger.info(f"本体设置成功: {len(entity_types)} 个实体类型, {len(edge_definitions)} 个边类型")
+            except Exception as e:
+                logger.error(f"设置本体失败: {str(e)}")
+                logger.error(f"实体类型: {list(entity_types.keys()) if entity_types else 'None'}")
+                logger.error(f"边类型: {list(edge_definitions.keys()) if edge_definitions else 'None'}")
+                raise RuntimeError(f"无法设置图谱本体: {str(e)}")
+        else:
+            logger.warning(f"图谱 {graph_id} 没有定义任何实体类型或边类型，跳过设置本体")
     
     def add_text_batches(
         self,
@@ -320,23 +380,23 @@ class GraphBuilderService:
                 for chunk in batch_chunks
             ]
             
-            # 发送到Zep
+            # 发送到Zep（带retry机制）
             try:
-                batch_result = self.client.graph.add_batch(
-                    graph_id=graph_id,
-                    episodes=episodes
+                batch_result = _retry_zep_call(
+                    func=lambda: self.client.graph.add_batch(graph_id=graph_id, episodes=episodes),
+                    operation_name=f"add_batch (batch {batch_num}/{total_batches})"
                 )
-                
+
                 # 收集返回的 episode uuid
                 if batch_result and isinstance(batch_result, list):
                     for ep in batch_result:
                         ep_uuid = getattr(ep, 'uuid_', None) or getattr(ep, 'uuid', None)
                         if ep_uuid:
                             episode_uuids.append(ep_uuid)
-                
+
                 # 避免请求过快
                 time.sleep(1)
-                
+
             except Exception as e:
                 if progress_callback:
                     progress_callback(t('progress.batchFailed', batch=batch_num, error=str(e)), 0)
@@ -373,16 +433,21 @@ class GraphBuilderService:
                     )
                 break
             
-            # 检查每个 episode 的处理状态
+            # 检查每个 episode 的处理状态（带retry）
             for ep_uuid in list(pending_episodes):
                 try:
-                    episode = self.client.graph.episode.get(uuid_=ep_uuid)
+                    episode = _retry_zep_call(
+                        func=lambda uid=ep_uuid: self.client.graph.episode.get(uuid_=uid),
+                        operation_name=f"episode.get({ep_uuid[:8]}...)",
+                        max_retries=2,
+                        initial_delay=1.0
+                    )
                     is_processed = getattr(episode, 'processed', False)
-                    
+
                     if is_processed:
                         pending_episodes.remove(ep_uuid)
                         completed_count += 1
-                        
+
                 except Exception as e:
                     # 忽略单个查询错误，继续
                     pass
@@ -400,6 +465,73 @@ class GraphBuilderService:
         if progress_callback:
             progress_callback(t('progress.processingComplete', completed=completed_count, total=total_episodes), 1.0)
     
+    def _classify_nodes(
+        self,
+        graph_id: str,
+        ontology: Dict[str, Any],
+        progress_callback: Optional[Callable] = None
+    ) -> Dict[str, str]:
+        """Sử dụng LLM phân loại các nodes vào entity types"""
+        try:
+            # Lấy entity types từ ontology
+            entity_types = [
+                et["name"]
+                for et in ontology.get("entity_types", [])
+                if "name" in et
+            ]
+
+            if not entity_types:
+                logger.warning(f"Không có entity types trong ontology, bỏ qua classification")
+                return {}
+
+            # Lấy tất cả nodes từ Zep
+            nodes = fetch_all_nodes(self.client, graph_id)
+
+            if not nodes:
+                logger.warning(f"Không có nodes trong graph {graph_id}")
+                return {}
+
+            # Phân loại
+            classifier = NodeClassifier()
+            classifications = classifier.classify_nodes(
+                nodes=nodes,
+                entity_types=entity_types,
+                batch_size=20
+            )
+
+            if progress_callback:
+                progress_callback(t('progress.classificationComplete', count=len(classifications)), 0.5)
+
+            # Lưu classifications vào project
+            self._save_classifications(graph_id, classifications)
+
+            if progress_callback:
+                progress_callback(t('progress.classificationSaved'), 1.0)
+
+            logger.info(f"Phân loại hoàn tất: {len(classifications)} nodes được gán labels")
+            return classifications
+
+        except Exception as e:
+            logger.error(f"Classification failed: {e}")
+            if progress_callback:
+                progress_callback(t('progress.classificationFailed', error=str(e)), 1.0)
+            return {}
+
+    def _save_classifications(self, graph_id: str, classifications: Dict[str, str]):
+        """Lưu classifications vào project tương ứng"""
+        try:
+            # Tìm project có graph_id này
+            projects = ProjectManager.list_projects(limit=100)
+            for project in projects:
+                if project.graph_id == graph_id:
+                    project.node_classifications = classifications
+                    ProjectManager.save_project(project)
+                    logger.info(f"Đã lưu {len(classifications)} classifications vào project {project.project_id}")
+                    return
+            logger.warning(f"Không tìm thấy project cho graph_id {graph_id}")
+        except Exception as e:
+            logger.error(f"Không thể lưu classifications: {e}")
+
     def _get_graph_info(self, graph_id: str) -> GraphInfo:
         """获取图谱信息"""
         # 获取节点（分页）

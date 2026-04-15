@@ -694,6 +694,22 @@ def get_prepare_status():
         # 如果没有task_id，返回错误
         if not task_id:
             if simulation_id:
+                # 检查 simulation 状态
+                manager = SimulationManager()
+                sim_state = manager.get_simulation(simulation_id)
+                if sim_state:
+                    if sim_state.status == SimulationStatus.FAILED:
+                        return jsonify({
+                            "success": True,
+                            "data": {
+                                "simulation_id": simulation_id,
+                                "status": "failed",
+                                "progress": 0,
+                                "message": sim_state.error or t('api.buildFailed'),
+                                "error": sim_state.error,
+                                "already_prepared": False
+                            }
+                        })
                 # 有simulation_id但未准备完成
                 return jsonify({
                     "success": True,
@@ -709,13 +725,28 @@ def get_prepare_status():
                 "success": False,
                 "error": t('api.requireTaskOrSimId')
             }), 400
-        
+
         task_manager = TaskManager()
         task = task_manager.get_task(task_id)
-        
+
         if not task:
-            # 任务不存在，但如果有simulation_id，检查是否已准备完成
+            # 任务不存在，但如果有simulation_id，检查是否已准备完成或失败
             if simulation_id:
+                manager = SimulationManager()
+                sim_state = manager.get_simulation(simulation_id)
+                if sim_state:
+                    if sim_state.status == SimulationStatus.FAILED:
+                        return jsonify({
+                            "success": True,
+                            "data": {
+                                "simulation_id": simulation_id,
+                                "status": "failed",
+                                "progress": 0,
+                                "message": sim_state.error or t('api.buildFailed'),
+                                "error": sim_state.error,
+                                "already_prepared": False
+                            }
+                        })
                 is_prepared, prepare_info = _check_simulation_prepared(simulation_id)
                 if is_prepared:
                     return jsonify({
@@ -730,7 +761,7 @@ def get_prepare_status():
                             "prepare_info": prepare_info
                         }
                     })
-            
+
             return jsonify({
                 "success": False,
                 "error": t('api.taskNotFound', id=task_id)
@@ -1693,6 +1724,89 @@ def stop_simulation():
         
     except Exception as e:
         logger.error(f"停止模拟失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/<simulation_id>/reset', methods=['POST'])
+def reset_simulation():
+    """
+    重置模拟状态（用于失败后重试）
+
+    请求（JSON）：
+        {
+            "simulation_id": "sim_xxxx"  // 必填，模拟ID
+        }
+
+    返回：
+        {
+            "success": true,
+            "data": {
+                "simulation_id": "sim_xxxx",
+                "status": "created",
+                "message": "Simulation reset successfully"
+            }
+        }
+    """
+    try:
+        simulation_id = data.get('simulation_id') if request.is_json else None
+        if not simulation_id:
+            simulation_id = request.form.get('simulation_id')
+
+        if not simulation_id:
+            return jsonify({
+                "success": False,
+                "error": t('api.requireSimulationId')
+            }), 400
+
+        manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": t('api.simulationNotFound', id=simulation_id)
+            }), 404
+
+        # Reset state
+        state.status = SimulationStatus.CREATED
+        state.config_generated = False
+        state.config_reasoning = ""
+        state.profiles_count = 0
+        state.entities_count = 0
+        state.entity_types = []
+        state.error = None
+        state.current_round = 0
+        state.twitter_status = "not_started"
+        state.reddit_status = "not_started"
+
+        manager._save_simulation_state(state)
+
+        # Clean up old files
+        sim_dir = manager._get_simulation_dir(simulation_id)
+        if os.path.exists(sim_dir):
+            # Remove old config and profile files
+            for f in ['simulation_config.json', 'reddit_profiles.json', 'twitter_profiles.csv']:
+                fpath = os.path.join(sim_dir, f)
+                if os.path.exists(fpath):
+                    os.remove(fpath)
+
+        logger.info(f"Reset simulation: {simulation_id}")
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_id": simulation_id,
+                "status": "created",
+                "message": "Simulation reset successfully"
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Reset simulation failed: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),

@@ -1,6 +1,6 @@
 """
-本体生成服务
-接口1：分析文本内容，生成适合社会模拟的实体和关系类型定义
+Dịch vụ sinh ontology
+Giao diện 1: Phân tích nội dung văn bản, sinh định nghĩa loại entity và quan hệ phù hợp cho mô phỏng xã hội
 """
 
 import json
@@ -14,169 +14,169 @@ logger = logging.getLogger(__name__)
 
 
 def _to_pascal_case(name: str) -> str:
-    """将任意格式的名称转换为 PascalCase（如 'works_for' -> 'WorksFor', 'person' -> 'Person'）"""
-    # 按非字母数字字符分割
+    """Chuyển đổi tên từ định dạng bất kỳ sang PascalCase (vd: 'works_for' -> 'WorksFor', 'person' -> 'Person')"""
+    # Tách theo ký tự không phải chữ số/chữ cái
     parts = re.split(r'[^a-zA-Z0-9]+', name)
-    # 再按 camelCase 边界分割（如 'camelCase' -> ['camel', 'Case']）
+    # Tách tiếp theo ranh giới camelCase (vd: 'camelCase' -> ['camel', 'Case'])
     words = []
     for part in parts:
         words.extend(re.sub(r'([a-z])([A-Z])', r'\1_\2', part).split('_'))
-    # 每个词首字母大写，过滤空串
+    # Viết hoa chữ cái đầu mỗi từ, lọc chuỗi rỗng
     result = ''.join(word.capitalize() for word in words if word)
     return result if result else 'Unknown'
 
 
-# 本体生成的系统提示词
-ONTOLOGY_SYSTEM_PROMPT = """你是一个专业的知识图谱本体设计专家。你的任务是分析给定的文本内容和模拟需求，设计适合**社交媒体舆论模拟**的实体类型和关系类型。
+# Prompt hệ thống cho việc sinh ontology
+ONTOLOGY_SYSTEM_PROMPT = """Bạn là một chuyên gia thiết kế ontology cho knowledge graph. Nhiệm vụ của bạn is phân tích nội dung văn bản và yêu cầu mô phỏng đã cho, thiết kế các loại entity và loại quan hệ phù hợp cho **mô phỏng dư luận trên mạng xã hội**.
 
-**重要：你必须输出有效的JSON格式数据，不要输出任何其他内容。**
+**Quan trọng: Bạn phải xuất dữ liệu ở định dạng JSON hợp lệ, không xuất bất kỳ nội dung nào khác.**
 
-## 核心任务背景
+## Bối cảnh nhiệm vụ cốt lõi
 
-我们正在构建一个**社交媒体舆论模拟系统**。在这个系统中：
-- 每个实体都是一个可以在社交媒体上发声、互动、传播信息的"账号"或"主体"
-- 实体之间会相互影响、转发、评论、回应
-- 我们需要模拟舆论事件中各方的反应和信息传播路径
+Chúng ta đang xây dựng một **hệ thống mô phỏng dư luận trên mạng xã hội**. Trong hệ thống này:
+- Mỗi entity đều là một "tài khoản" hoặc "chủ thể" có thể phát ngôn, tương tác, lan truyền thông tin trên mạng xã hội
+- Các entity sẽ ảnh hưởng lẫn nhau, repost, bình luận, phản hồi
+- Chúng ta cần mô phỏng phản ứng của các bên và đường lan truyền thông tin trong sự kiện dư luận
 
-因此，**实体必须是现实中真实存在的、可以在社媒上发声和互动的主体**：
+Do đó, **entity phải là các chủ thể có thật ngoài đời, có thể phát ngôn và tương tác trên MXH**:
 
-**可以是**：
-- 具体的个人（公众人物、当事人、意见领袖、专家学者、普通人）
-- 公司、企业（包括其官方账号）
-- 组织机构（大学、协会、NGO、工会等）
-- 政府部门、监管机构
-- 媒体机构（报纸、电视台、自媒体、网站）
-- 社交媒体平台本身
-- 特定群体代表（如校友会、粉丝团、维权群体等）
+**Có thể là**:
+- Cá nhân cụ thể (người nổi tiếng, người trong cuộc, KOL, chuyên gia, người bình thường)
+- Công ty, doanh nghiệp (bao gồm cả tài khoản chính thức)
+- Tổ chức (trường đại học, hiệp hội, NGO, công đoàn, v.v.)
+- Cơ quan chính phủ, cơ quan quản lý
+- Tổ chức truyền thông (báo chí, đài truyền hình,truyền thông tự phát, website)
+- Nền tảng mạng xã hộibản thân
+- Đại diện nhóm cụ thể (như hội cựu sinh viên, fan club, nhóm bảo vệ quyền lợi, v.v.)
 
-**不可以是**：
-- 抽象概念（如"舆论"、"情绪"、"趋势"）
-- 主题/话题（如"学术诚信"、"教育改革"）
-- 观点/态度（如"支持方"、"反对方"）
+**Không thể là**:
+- Khái niệm trừu tượng (như "dư luận", "cảm xúc", "xu hướng")
+- Chủ đề/đề tài (như "chính trực học thuật", "cải cách giáo dục")
+- Quan điểm/thái độ (như "phe ủng hộ", "phe phản đối")
 
-## 输出格式
+## Định dạng xuất
 
-请输出JSON格式，包含以下结构：
+Vui lòng xuất ở định dạng JSON, bao gồm cấu trúc sau:
 
 ```json
 {
     "entity_types": [
         {
-            "name": "实体类型名称（英文，PascalCase）",
-            "description": "简短描述（英文，不超过100字符）",
+            "name": "Tên loại entity (tiếng Anh, PascalCase)",
+            "description": "Mô tả ngắn (tiếng Anh, không quá 100 ký tự)",
             "attributes": [
                 {
-                    "name": "属性名（英文，snake_case）",
+                    "name": "Tên thuộc tính (tiếng Anh, snake_case)",
                     "type": "text",
-                    "description": "属性描述"
+                    "description": "Mô tả thuộc tính"
                 }
             ],
-            "examples": ["示例实体1", "示例实体2"]
+            "examples": ["Ví dụ entity 1", "Ví dụ entity 2"]
         }
     ],
     "edge_types": [
         {
-            "name": "关系类型名称（英文，UPPER_SNAKE_CASE）",
-            "description": "简短描述（英文，不超过100字符）",
+            "name": "Tên loại quan hệ (tiếng Anh, UPPER_SNAKE_CASE)",
+            "description": "Mô tả ngắn (tiếng Anh, không quá 100 ký tự)",
             "source_targets": [
-                {"source": "源实体类型", "target": "目标实体类型"}
+                {"source": "Loại entity nguồn", "target": "Loại entity đích"}
             ],
             "attributes": []
         }
     ],
-    "analysis_summary": "对文本内容的简要分析说明"
+    "analysis_summary": "Mô tả ngắn gọn về phân tích nội dung văn bản"
 }
 ```
 
-## 设计指南（极其重要！）
+## Hướng dẫn thiết kế (cực kỳ quan trọng!)
 
-### 1. 实体类型设计 - 必须严格遵守
+### 1. Thiết kế loại entity - Phải tuân thủ nghiêm ngặt
 
-**数量要求：必须正好10个实体类型**
+**Yêu cầu số lượng: Phải đúng 10 loại entity**
 
-**层次结构要求（必须同时包含具体类型和兜底类型）**：
+**Yêu cầu cấu trúc phân tầng (phải bao gồm cả loại cụ thể và loại fallback)**:
 
-你的10个实体类型必须包含以下层次：
+10 loại entity của bạn phải bao gồm các tầng sau:
 
-A. **兜底类型（必须包含，放在列表最后2个）**：
-   - `Person`: 任何自然人个体的兜底类型。当一个人不属于其他更具体的人物类型时，归入此类。
-   - `Organization`: 任何组织机构的兜底类型。当一个组织不属于其他更具体的组织类型时，归入此类。
+A. **Loại fallback (bắt buộc, đặt ở 2 vị trí cuối danh sách)**:
+   - `Person`: Fallback cho bất kỳ cá nhân tự nhiên nào. Khi một người không thuộc loại người cụ thể nào khác, xếp vào loại này.
+   - `Organization`: Fallback cho bất kỳ tổ chức nào. Khi một tổ chức không thuộc loại tổ chức cụ thể nào khác, xếp vào loại này.
 
-B. **具体类型（8个，根据文本内容设计）**：
-   - 针对文本中出现的主要角色，设计更具体的类型
-   - 例如：如果文本涉及学术事件，可以有 `Student`, `Professor`, `University`
-   - 例如：如果文本涉及商业事件，可以有 `Company`, `CEO`, `Employee`
+B. **Loại cụ thể (8 loại, thiết kế theo nội dung văn bản)**:
+   - Nhận diện các vai trò chính xuất hiện trong văn bản, thiết kế loại cụ thể hơn
+   - Ví dụ: nếu văn bản liên quan sự kiện học thuật, có thể có `Student`, `Professor`, `University`
+   - Ví dụ: nếu văn bản liên quan sự kiện kinh doanh, có thể có `Company`, `CEO`, `Employee`
 
-**为什么需要兜底类型**：
-- 文本中会出现各种人物，如"中小学教师"、"路人甲"、"某位网友"
-- 如果没有专门的类型匹配，他们应该被归入 `Person`
-- 同理，小型组织、临时团体等应该归入 `Organization`
+**Tại sao cần loại fallback**:
+- Văn bản sẽ xuất hiện nhiều loại người khác nhau, như "giáo viên tiểu học", "người qua đường", "một netizen nào đó"
+- Nếu không có loại chuyên biệt phù hợp, họ nên được xếp vào `Person`
+- Tương tự, tổ chức nhỏ, nhóm tạm thời, v.v. nên được xếp vào `Organization`
 
-**具体类型的设计原则**：
-- 从文本中识别出高频出现或关键的角色类型
-- 每个具体类型应该有明确的边界，避免重叠
-- description 必须清晰说明这个类型和兜底类型的区别
+**Nguyên tắc thiết kế loại cụ thể**:
+- Nhận diện các loại vai trò xuất hiện thường xuyên hoặc then chốt trong văn bản
+- Mỗi loại cụ thể phải có ranh giới rõ ràng, tránh chồng chéo
+- description phải nói rõ sự khác biệt giữa loại này và loại fallback
 
-### 2. 关系类型设计
+### 2. Thiết kế loại quan hệ
 
-- 数量：6-10个
-- 关系应该反映社媒互动中的真实联系
-- 确保关系的 source_targets 涵盖你定义的实体类型
+- Số lượng: 6-10
+- Quan hệ nên phản ánh kết nối thực tế trong tương tác MXH
+- Đảm bảo source_targets của quan hệ bao phủ các loại entity bạn đã định nghĩa
 
-### 3. 属性设计
+### 3. Thiết kế thuộc tính
 
-- 每个实体类型1-3个关键属性
-- **注意**：属性名不能使用 `name`、`uuid`、`group_id`、`created_at`、`summary`（这些是系统保留字）
-- 推荐使用：`full_name`, `title`, `role`, `position`, `location`, `description` 等
+- Mỗi loại entity 1-3 thuộc tính then chốt
+- **Chú ý**: Tên thuộc tính không được dùng `name`, `uuid`, `group_id`, `created_at`, `summary` (đây là từ dành riêng của hệ thống)
+- Khuyến nghị: `full_name`, `title`, `role`, `position`, `location`, `description`, v.v.
 
-## 实体类型参考
+## Tham khảo loại entity
 
-**个人类（具体）**：
-- Student: 学生
-- Professor: 教授/学者
-- Journalist: 记者
-- Celebrity: 明星/网红
-- Executive: 高管
-- Official: 政府官员
-- Lawyer: 律师
-- Doctor: 医生
+**Loại cá nhân (cụ thể)**:
+- Student: Học sinh/Sinh viên
+- Professor: Giáo sư/Học giả
+- Journalist: Phóng viên
+- Celebrity: Người nổi tiếng/Influencer
+- Executive: Quản lý cấp cao
+- Official: Quan chức chính phủ
+- Lawyer: Luật sư
+- Doctor: Bác sĩ
 
-**个人类（兜底）**：
-- Person: 任何自然人（不属于上述具体类型时使用）
+**Loại cá nhân (fallback)**:
+- Person: Bất kỳ cá nhân tự nhiên nào (dùng khi không thuộc các loại cụ thể trên)
 
-**组织类（具体）**：
-- University: 高校
-- Company: 公司企业
-- GovernmentAgency: 政府机构
-- MediaOutlet: 媒体机构
-- Hospital: 医院
-- School: 中小学
-- NGO: 非政府组织
+**Loại tổ chức (cụ thể)**:
+- University: Trường đại học
+- Company: Công ty doanh nghiệp
+- GovernmentAgency: Cơ quan chính phủ
+- MediaOutlet: Tổ chức truyền thông
+- Hospital: Bệnh viện
+- School: Trường phổ thông
+- NGO: Tổ chức phi chính phủ
 
-**组织类（兜底）**：
-- Organization: 任何组织机构（不属于上述具体类型时使用）
+**Loại tổ chức (fallback)**:
+- Organization: Bất kỳ tổ chức nào (dùng khi không thuộc các loại cụ thể trên)
 
-## 关系类型参考
+## Tham khảo loại quan hệ
 
-- WORKS_FOR: 工作于
-- STUDIES_AT: 就读于
-- AFFILIATED_WITH: 隶属于
-- REPRESENTS: 代表
-- REGULATES: 监管
-- REPORTS_ON: 报道
-- COMMENTS_ON: 评论
-- RESPONDS_TO: 回应
-- SUPPORTS: 支持
-- OPPOSES: 反对
-- COLLABORATES_WITH: 合作
-- COMPETES_WITH: 竞争
+- WORKS_FOR: Làm việc tại
+- STUDIES_AT: Học tại
+- AFFILIATED_WITH: Thuộc về
+- REPRESENTS: Đại diện
+- REGULATES: Quản lý
+- REPORTS_ON: Đưa tin về
+- COMMENTS_ON: Bình luận về
+- RESPONDS_TO: Phản hồi
+- SUPPORTS: Ủng hộ
+- OPPOSES: Phản đối
+- COLLABORATES_WITH: Hợp tác
+- COMPETES_WITH: Cạnh tranh
 """
 
 
 class OntologyGenerator:
     """
-    本体生成器
-    分析文本内容，生成实体和关系类型定义
+    Bộ sinh ontology
+    Phân tích nội dung văn bản, sinh định nghĩa loại entity và quan hệ
     """
     
     def __init__(self, llm_client: Optional[LLMClient] = None):
@@ -189,17 +189,17 @@ class OntologyGenerator:
         additional_context: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        生成本体定义
-        
+        Sinh định nghĩa ontology
+
         Args:
-            document_texts: 文档文本列表
-            simulation_requirement: 模拟需求描述
-            additional_context: 额外上下文
-            
+            document_texts: Danh sách văn bản tài liệu
+            simulation_requirement: Mô tả yêu cầu mô phỏng
+            additional_context: Ngữ cảnh bổ sung
+
         Returns:
-            本体定义（entity_types, edge_types等）
+            Định nghĩa ontology (entity_types, edge_types, v.v.)
         """
-        # 构建用户消息
+        # Xây dựng thông điệp người dùng
         user_message = self._build_user_message(
             document_texts, 
             simulation_requirement,
@@ -213,19 +213,26 @@ class OntologyGenerator:
             {"role": "user", "content": user_message}
         ]
         
-        # 调用LLM
-        result = self.llm_client.chat_json(
-            messages=messages,
-            temperature=0.3,
-            max_tokens=4096
-        )
-        
-        # 验证和后处理
+        # Gọi LLM
+        try:
+            result = self.llm_client.chat_json(
+                messages=messages,
+                temperature=0.3,
+                max_tokens=4096
+            )
+            logger.info("LLM sinh ontology thành công")
+        except Exception as e:
+            logger.warning(f"LLM call thất bại: {str(e)}. Sử dụng fallback ontology generator...")
+            result = self._generate_fallback_ontology(
+                document_texts, simulation_requirement, additional_context
+            )
+
+        # Xác thực và xử lý hậu kỳ
         result = self._validate_and_process(result)
-        
+
         return result
     
-    # 传给 LLM 的文本最大长度（5万字）
+    # Độ dài tối đa của văn bản gửi cho LLM (50 nghìn ký tự)
     MAX_TEXT_LENGTH_FOR_LLM = 50000
     
     def _build_user_message(
@@ -234,50 +241,50 @@ class OntologyGenerator:
         simulation_requirement: str,
         additional_context: Optional[str]
     ) -> str:
-        """构建用户消息"""
+        """Xây dựng thông điệp người dùng"""
         
-        # 合并文本
+        # Gộp văn bản
         combined_text = "\n\n---\n\n".join(document_texts)
         original_length = len(combined_text)
         
-        # 如果文本超过5万字，截断（仅影响传给LLM的内容，不影响图谱构建）
+        # Nếu văn bản vượt quá 50 nghìn ký tự, cắt ngắn (chỉ ảnh hưởng đến nội dung gửi LLM, không ảnh hưởng đến xây dựng đồ thị)
         if len(combined_text) > self.MAX_TEXT_LENGTH_FOR_LLM:
             combined_text = combined_text[:self.MAX_TEXT_LENGTH_FOR_LLM]
-            combined_text += f"\n\n...(原文共{original_length}字，已截取前{self.MAX_TEXT_LENGTH_FOR_LLM}字用于本体分析)..."
+            combined_text += f"\n\n...(Văn bản gốc có {original_length} ký tự, đã lấy {self.MAX_TEXT_LENGTH_FOR_LLM} ký tự đầu cho phân tích ontology)..."
         
-        message = f"""## 模拟需求
+        message = f"""## Yêu cầu mô phỏng
 
 {simulation_requirement}
 
-## 文档内容
+## Nội dung tài liệu
 
 {combined_text}
 """
         
         if additional_context:
             message += f"""
-## 额外说明
+## Ghi chú bổ sung
 
 {additional_context}
 """
         
         message += """
-请根据以上内容，设计适合社会舆论模拟的实体类型和关系类型。
+Vui lòng dựa trên nội dung trên, thiết kế các loại entity và quan hệ phù hợp cho mô phỏng dư luận xã hội.
 
-**必须遵守的规则**：
-1. 必须正好输出10个实体类型
-2. 最后2个必须是兜底类型：Person（个人兜底）和 Organization（组织兜底）
-3. 前8个是根据文本内容设计的具体类型
-4. 所有实体类型必须是现实中可以发声的主体，不能是抽象概念
-5. 属性名不能使用 name、uuid、group_id 等保留字，用 full_name、org_name 等替代
+**Các quy tắc bắt buộc**：
+1. Phải xuất chính xác 10 loại entity
+2. 2 cái cuối phải là loại fallback: Person (fallback cá nhân) và Organization (fallback tổ chức)
+3. 8 cái đầu là loại cụ thể thiết kế theo nội dung văn bản
+4. Tất cả loại entity phải là chủ thể có thể phát ngôn trong thực tế, không được là khái niệm trừu tượng
+5. Tên thuộc tính không được dùng từ dành riêng như name, uuid, group_id, hãy dùng full_name, org_name, v.v.
 """
         
         return message
     
     def _validate_and_process(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """验证和后处理结果"""
+        """Xác thực và xử lý hậu kỳ kết quả"""
         
-        # 确保必要字段存在
+        # Đảm bảo các trường cần thiết tồn tại
         if "entity_types" not in result:
             result["entity_types"] = []
         if "edge_types" not in result:
@@ -285,11 +292,11 @@ class OntologyGenerator:
         if "analysis_summary" not in result:
             result["analysis_summary"] = ""
         
-        # 验证实体类型
-        # 记录原始名称到 PascalCase 的映射，用于后续修正 edge 的 source_targets 引用
+        # Xác thực loại entity
+        # Ghi lại ánh xạ tên gốc sang PascalCase, dùng để sửa tham chiếu source_targets của edge
         entity_name_map = {}
         for entity in result["entity_types"]:
-            # 强制将 entity name 转为 PascalCase（Zep API 要求）
+            # Bắt buộc chuyển tên entity sang PascalCase (yêu cầu Zep API)
             if "name" in entity:
                 original_name = entity["name"]
                 entity["name"] = _to_pascal_case(original_name)
@@ -300,19 +307,19 @@ class OntologyGenerator:
                 entity["attributes"] = []
             if "examples" not in entity:
                 entity["examples"] = []
-            # 确保description不超过100字符
+            # Đảm bảo description không vượt quá 100 ký tự
             if len(entity.get("description", "")) > 100:
                 entity["description"] = entity["description"][:97] + "..."
         
-        # 验证关系类型
+        # Xác thực loại quan hệ
         for edge in result["edge_types"]:
-            # 强制将 edge name 转为 SCREAMING_SNAKE_CASE（Zep API 要求）
+            # Bắt buộc chuyển tên edge sang SCREAMING_SNAKE_CASE (yêu cầu Zep API)
             if "name" in edge:
                 original_name = edge["name"]
                 edge["name"] = original_name.upper()
                 if edge["name"] != original_name:
                     logger.warning(f"Edge type name '{original_name}' auto-converted to '{edge['name']}'")
-            # 修正 source_targets 中的实体名称引用，与转换后的 PascalCase 保持一致
+            # Sửa tham chiếu tên entity trong source_targets, đồng bộ với PascalCase đã chuyển
             for st in edge.get("source_targets", []):
                 if st.get("source") in entity_name_map:
                     st["source"] = entity_name_map[st["source"]]
@@ -325,11 +332,11 @@ class OntologyGenerator:
             if len(edge.get("description", "")) > 100:
                 edge["description"] = edge["description"][:97] + "..."
         
-        # Zep API 限制：最多 10 个自定义实体类型，最多 10 个自定义边类型
+        # Giới hạn Zep API: tối đa 10 loại entity tùy chỉnh, tối đa 10 loại edge tùy chỉnh
         MAX_ENTITY_TYPES = 10
         MAX_EDGE_TYPES = 10
 
-        # 去重：按 name 去重，保留首次出现的
+        # Loại bỏ trùng: theo name, giữ lại cái xuất hiện đầu
         seen_names = set()
         deduped = []
         for entity in result["entity_types"]:
@@ -341,7 +348,7 @@ class OntologyGenerator:
                 logger.warning(f"Duplicate entity type '{name}' removed during validation")
         result["entity_types"] = deduped
 
-        # 兜底类型定义
+        # Định nghĩa loại fallback
         person_fallback = {
             "name": "Person",
             "description": "Any individual person not fitting other specific person types.",
@@ -362,12 +369,12 @@ class OntologyGenerator:
             "examples": ["small business", "community group"]
         }
         
-        # 检查是否已有兜底类型
+        # Kiểm tra xem đã có loại fallback chưa
         entity_names = {e["name"] for e in result["entity_types"]}
         has_person = "Person" in entity_names
         has_organization = "Organization" in entity_names
         
-        # 需要添加的兜底类型
+        # Loại fallback cần thêm
         fallbacks_to_add = []
         if not has_person:
             fallbacks_to_add.append(person_fallback)
@@ -378,17 +385,17 @@ class OntologyGenerator:
             current_count = len(result["entity_types"])
             needed_slots = len(fallbacks_to_add)
             
-            # 如果添加后会超过 10 个，需要移除一些现有类型
+            # Nếu thêm vào vượt quá 10 cái, cần xóa bớt một số loại hiện có
             if current_count + needed_slots > MAX_ENTITY_TYPES:
-                # 计算需要移除多少个
+                # Tính số lượng cần xóa
                 to_remove = current_count + needed_slots - MAX_ENTITY_TYPES
-                # 从末尾移除（保留前面更重要的具体类型）
+                # Xóa từ cuối (giữ lại loại cụ thể quan trọng hơn ở phía trước)
                 result["entity_types"] = result["entity_types"][:-to_remove]
             
-            # 添加兜底类型
+            # Thêm loại fallback
             result["entity_types"].extend(fallbacks_to_add)
         
-        # 最终确保不超过限制（防御性编程）
+        # Cuối cùng đảm bảo không vượt giới hạn (lập trình phòng vệ)
         if len(result["entity_types"]) > MAX_ENTITY_TYPES:
             result["entity_types"] = result["entity_types"][:MAX_ENTITY_TYPES]
         
@@ -396,32 +403,242 @@ class OntologyGenerator:
             result["edge_types"] = result["edge_types"][:MAX_EDGE_TYPES]
         
         return result
-    
+
+    def _generate_fallback_ontology(
+        self,
+        document_texts: List[str],
+        simulation_requirement: str,
+        additional_context: Optional[str]
+    ) -> Dict[str, Any]:
+        """
+
+Cung cấp các entity và relation cơ bản cho mô phỏng mạng xã hội
+        """
+        combined_text = "\n\n".join(document_texts)
+        # Tạo tóm tắt đơn giản từ văn bản
+        summary = f"Ontology generated from {len(combined_text)} characters of content. Simulation requirement: {simulation_requirement[:200]}"
+
+        return {
+            "entity_types": [
+                {
+                    "name": "Person",
+                    "description": "Any individual person participating in social media",
+                    "attributes": [
+                        {"name": "full_name", "type": "text", "description": "Full name"},
+                        {"name": "role", "type": "text", "description": "Role or occupation"}
+                    ],
+                    "examples": ["user", "individual"]
+                },
+                {
+                    "name": "Organization",
+                    "description": "Any organization or group entity",
+                    "attributes": [
+                        {"name": "org_name", "type": "text", "description": "Organization name"},
+                        {"name": "org_type", "type": "text", "description": "Type of organization"}
+                    ],
+                    "examples": ["company", "institution"]
+                },
+                {
+                    "name": "MediaOutlet",
+                    "description": "Media organization or news outlet",
+                    "attributes": [
+                        {"name": "outlet_name", "type": "text", "description": "Name of the media outlet"},
+                        {"name": "media_type", "type": "text", "description": "Type of media (news, blog, etc.)"}
+                    ],
+                    "examples": ["news agency", "online publication"]
+                },
+                {
+                    "name": "GovernmentAgency",
+                    "description": "Government or regulatory body",
+                    "attributes": [
+                        {"name": "agency_name", "type": "text", "description": "Name of the agency"},
+                        {"name": "jurisdiction", "type": "text", "description": "Area of jurisdiction"}
+                    ],
+                    "examples": ["regulatory body", "government department"]
+                },
+                {
+                    "name": "Expert",
+                    "description": "Domain expert or thought leader",
+                    "attributes": [
+                        {"name": "expert_name", "type": "text", "description": "Name of the expert"},
+                        {"name": "field", "type": "text", "description": "Area of expertise"}
+                    ],
+                    "examples": ["analyst", "researcher"]
+                },
+                {
+                    "name": "Activist",
+                    "description": "Social activist or advocate",
+                    "attributes": [
+                        {"name": "activist_name", "type": "text", "description": "Name of the activist"},
+                        {"name": "cause", "type": "text", "description": "Cause they advocate for"}
+                    ],
+                    "examples": ["campaigner", "advocate"]
+                },
+                {
+                    "name": "Influencer",
+                    "description": "Social media influencer with significant following",
+                    "attributes": [
+                        {"name": "influencer_name", "type": "text", "description": "Name of the influencer"},
+                        {"name": "platform", "type": "text", "description": "Primary social media platform"}
+                    ],
+                    "examples": ["content creator", "key opinion leader"]
+                },
+                {
+                    "name": "Company",
+                    "description": "Business or corporate entity",
+                    "attributes": [
+                        {"name": "company_name", "type": "text", "description": "Name of the company"},
+                        {"name": "industry", "type": "text", "description": "Industry sector"}
+                    ],
+                    "examples": ["corporation", "startup"]
+                },
+                {
+                    "name": "University",
+                    "description": "Educational or research institution",
+                    "attributes": [
+                        {"name": "uni_name", "type": "text", "description": "Name of the institution"},
+                        {"name": "focus_area", "type": "text", "description": "Primary academic focus"}
+                    ],
+                    "examples": ["research university", "college"]
+                },
+                {
+                    "name": "NGO",
+                    "description": "Non-governmental organization",
+                    "attributes": [
+                        {"name": "ngo_name", "type": "text", "description": "Name of the NGO"},
+                        {"name": "mission", "type": "text", "description": "Primary mission or focus"}
+                    ],
+                    "examples": ["non-profit", "charity"]
+                }
+            ],
+            "edge_types": [
+                {
+                    "name": "WORKS_FOR",
+                    "description": "Employment or affiliation relationship",
+                    "source_targets": [
+                        {"source": "Person", "target": "Organization"},
+                        {"source": "Person", "target": "Company"},
+                        {"source": "Person", "target": "University"}
+                    ],
+                    "attributes": []
+                },
+                {
+                    "name": "AFFILIATED_WITH",
+                    "description": "General affiliation or association",
+                    "source_targets": [
+                        {"source": "Person", "target": "Organization"},
+                        {"source": "Organization", "target": "Organization"}
+                    ],
+                    "attributes": []
+                },
+                {
+                    "name": "RESPONDS_TO",
+                    "description": "One entity responds to another",
+                    "source_targets": [
+                        {"source": "Person", "target": "Person"},
+                        {"source": "Organization", "target": "Person"},
+                        {"source": "Organization", "target": "Organization"}
+                    ],
+                    "attributes": []
+                },
+                {
+                    "name": "SUPPORTS",
+                    "description": "One entity supports another",
+                    "source_targets": [
+                        {"source": "Person", "target": "Person"},
+                        {"source": "Organization", "target": "Person"},
+                        {"source": "Organization", "target": "Organization"}
+                    ],
+                    "attributes": []
+                },
+                {
+                    "name": "OPPOSES",
+                    "description": "One entity opposes another",
+                    "source_targets": [
+                        {"source": "Person", "target": "Person"},
+                        {"source": "Organization", "target": "Person"},
+                        {"source": "Organization", "target": "Organization"}
+                    ],
+                    "attributes": []
+                },
+                {
+                    "name": "REPORTS_ON",
+                    "description": "Media reports on an entity or event",
+                    "source_targets": [
+                        {"source": "MediaOutlet", "target": "Person"},
+                        {"source": "MediaOutlet", "target": "Organization"},
+                        {"source": "MediaOutlet", "target": "Company"}
+                    ],
+                    "attributes": []
+                },
+                {
+                    "name": "REGULATES",
+                    "description": "Government agency regulates an entity",
+                    "source_targets": [
+                        {"source": "GovernmentAgency", "target": "Company"},
+                        {"source": "GovernmentAgency", "target": "Organization"}
+                    ],
+                    "attributes": []
+                },
+                {
+                    "name": "COLLABORATES_WITH",
+                    "description": "Two entities collaborate",
+                    "source_targets": [
+                        {"source": "Person", "target": "Person"},
+                        {"source": "Organization", "target": "Organization"},
+                        {"source": "Person", "target": "Organization"}
+                    ],
+                    "attributes": []
+                },
+                {
+                    "name": "INFLUENCES",
+                    "description": "One entity influences another",
+                    "source_targets": [
+                        {"source": "Influencer", "target": "Person"},
+                        {"source": "Expert", "target": "Person"},
+                        {"source": "MediaOutlet", "target": "Person"}
+                    ],
+                    "attributes": []
+                },
+                {
+                    "name": "ADVOCATES_FOR",
+                    "description": "One entity advocates for a cause or group",
+                    "source_targets": [
+                        {"source": "Activist", "target": "Person"},
+                        {"source": "NGO", "target": "Person"},
+                        {"source": "Activist", "target": "Organization"}
+                    ],
+                    "attributes": []
+                }
+            ],
+            "analysis_summary": summary
+        }
+
     def generate_python_code(self, ontology: Dict[str, Any]) -> str:
         """
-        将本体定义转换为Python代码（类似ontology.py）
-        
+        Chuyển định nghĩa ontology sang mã Python (tương tự ontology.py)
+
         Args:
-            ontology: 本体定义
-            
+            ontology: Định nghĩa ontology
+
         Returns:
-            Python代码字符串
+            Chuỗi mã Python
         """
         code_lines = [
             '"""',
-            '自定义实体类型定义',
-            '由MiroFish自动生成，用于社会舆论模拟',
+            'Định nghĩa loại entity tùy chỉnh',
+            'Được MiroFish sinh tự động, dùng cho mô phỏng dư luận xã hội',
             '"""',
             '',
             'from pydantic import Field',
             'from zep_cloud.external_clients.ontology import EntityModel, EntityText, EdgeModel',
             '',
             '',
-            '# ============== 实体类型定义 ==============',
+            '# ============== Định nghĩa loại entity ==============',
             '',
         ]
-        
-        # 生成实体类型
+
+        # Sinh loại entity
         for entity in ontology.get("entity_types", []):
             name = entity["name"]
             desc = entity.get("description", f"A {name} entity.")
@@ -444,13 +661,13 @@ class OntologyGenerator:
             code_lines.append('')
             code_lines.append('')
         
-        code_lines.append('# ============== 关系类型定义 ==============')
+        code_lines.append('# ============== Định nghĩa loại quan hệ ==============')
         code_lines.append('')
         
-        # 生成关系类型
+        # Sinh loại quan hệ
         for edge in ontology.get("edge_types", []):
             name = edge["name"]
-            # 转换为PascalCase类名
+            # Chuyển sang tên class PascalCase
             class_name = ''.join(word.capitalize() for word in name.split('_'))
             desc = edge.get("description", f"A {name} relationship.")
             
@@ -472,8 +689,8 @@ class OntologyGenerator:
             code_lines.append('')
             code_lines.append('')
         
-        # 生成类型字典
-        code_lines.append('# ============== 类型配置 ==============')
+        # Sinh từ điển loại
+        code_lines.append('# ============== Cấu hình loại ==============')
         code_lines.append('')
         code_lines.append('ENTITY_TYPES = {')
         for entity in ontology.get("entity_types", []):
@@ -489,7 +706,7 @@ class OntologyGenerator:
         code_lines.append('}')
         code_lines.append('')
         
-        # 生成边的source_targets映射
+        # Sinh ánh xạ source_targets của edge
         code_lines.append('EDGE_SOURCE_TARGETS = {')
         for edge in ontology.get("edge_types", []):
             name = edge["name"]

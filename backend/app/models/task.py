@@ -175,12 +175,31 @@ class TaskManager:
         """清理旧任务"""
         from datetime import timedelta
         cutoff = datetime.now() - timedelta(hours=max_age_hours)
-        
+
         with self._task_lock:
             old_ids = [
                 tid for tid, task in self._tasks.items()
                 if task.created_at < cutoff and task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]
             ]
             for tid in old_ids:
+                del self._tasks[tid]
+
+    def cleanup_completed_tasks(self, max_count: int = 100):
+        """清理已完成/失败的任务，只保留最近max_count个"""
+        with self._task_lock:
+            # 按创建时间排序
+            sorted_tasks = sorted(self._tasks.items(), key=lambda x: x[1].created_at, reverse=True)
+
+            # 找出需要删除的任务（超过max_count的已完成/失败任务）
+            kept = 0
+            to_delete = []
+            for tid, task in sorted_tasks:
+                if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+                    if kept >= max_count:
+                        to_delete.append(tid)
+                    else:
+                        kept += 1
+
+            for tid in to_delete:
                 del self._tasks[tid]
 

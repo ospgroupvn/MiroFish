@@ -14,6 +14,7 @@ from enum import Enum
 
 from ..config import Config
 from ..utils.logger import get_logger
+from ..models.project import ProjectManager
 from .zep_entity_reader import ZepEntityReader, FilteredEntities
 from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
 from .simulation_config_generator import SimulationConfigGenerator, SimulationParameters
@@ -274,14 +275,25 @@ class SimulationManager:
                 progress_callback("reading", 0, t('progress.connectingZepGraph'))
             
             reader = ZepEntityReader()
-            
+
             if progress_callback:
                 progress_callback("reading", 30, t('progress.readingNodeData'))
-            
+
+            # Lấy classifications từ project (nếu có)
+            classifications = None
+            projects = ProjectManager.list_projects(limit=100)
+            for project in projects:
+                if project.graph_id == state.graph_id:
+                    classifications = project.node_classifications
+                    if classifications:
+                        logger.info(f"Tìm thấy {len(classifications)} classifications từ project {project.project_id}")
+                    break
+
             filtered = reader.filter_defined_entities(
                 graph_id=state.graph_id,
                 defined_entity_types=defined_entity_types,
-                enrich_with_edges=True
+                enrich_with_edges=True,
+                classifications=classifications
             )
             
             state.entities_count = filtered.filtered_count
@@ -297,7 +309,14 @@ class SimulationManager:
             
             if filtered.filtered_count == 0:
                 state.status = SimulationStatus.FAILED
-                state.error = "没有找到符合条件的实体，请检查图谱是否正确构建"
+                # Provide detailed error message
+                error_msg = (
+                    f"Không tìm thấy thực thể nào phù hợp trong {filtered.total_count} nodes. "
+                    f"Các nodes trong graph không có Labels hoặc Labels không khớp với ontology. "
+                    f"Vui lòng rebuild graph (Step 1) với force=true để gán Labels cho nodes."
+                )
+                state.error = error_msg
+                logger.error(f"Simulation preparation failed: {error_msg}")
                 self._save_simulation_state(state)
                 return state
             

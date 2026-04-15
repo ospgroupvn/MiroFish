@@ -213,61 +213,74 @@ class ZepEntityReader:
             return []
     
     def filter_defined_entities(
-        self, 
+        self,
         graph_id: str,
         defined_entity_types: Optional[List[str]] = None,
-        enrich_with_edges: bool = True
+        enrich_with_edges: bool = True,
+        classifications: Optional[Dict[str, str]] = None
     ) -> FilteredEntities:
         """
         筛选出符合预定义实体类型的节点
-        
+
         筛选逻辑：
-        - 如果节点的Labels只有一个"Entity"，说明这个实体不符合我们预定义的类型，跳过
-        - 如果节点的Labels包含除"Entity"和"Node"之外的标签，说明符合预定义类型，保留
-        
+        - 优先使用节点的Zep Labels（如果包含除"Entity"和"Node"之外的标签）
+        - 如果节点没有自定义Labels但有classification映射，使用classification结果
+        - 如果指定了预定义类型，检查是否匹配
+
         Args:
             graph_id: 图谱ID
             defined_entity_types: 预定义的实体类型列表（可选，如果提供则只保留这些类型）
             enrich_with_edges: 是否获取每个实体的相关边信息
-            
+            classifications: node_uuid -> entity_type 映射（来自LLM分类结果）
+
         Returns:
             FilteredEntities: 过滤后的实体集合
         """
         logger.info(f"开始筛选图谱 {graph_id} 的实体...")
-        
+
         # 获取所有节点
         all_nodes = self.get_all_nodes(graph_id)
         total_count = len(all_nodes)
-        
+
         # 获取所有边（用于后续关联查找）
         all_edges = self.get_all_edges(graph_id) if enrich_with_edges else []
-        
+
         # 构建节点UUID到节点数据的映射
         node_map = {n["uuid"]: n for n in all_nodes}
-        
+
         # 筛选符合条件的实体
         filtered_entities = []
         entity_types_found = set()
-        
+        classified_count = 0
+        label_count = 0
+
         for node in all_nodes:
             labels = node.get("labels", [])
-            
-            # 筛选逻辑：Labels必须包含除"Entity"和"Node"之外的标签
+            node_uuid = node["uuid"]
+
+            # 优先检查Zep labels
             custom_labels = [l for l in labels if l not in ["Entity", "Node"]]
-            
-            if not custom_labels:
-                # 只有默认标签，跳过
-                continue
-            
-            # 如果指定了预定义类型，检查是否匹配
-            if defined_entity_types:
-                matching_labels = [l for l in custom_labels if l in defined_entity_types]
-                if not matching_labels:
+
+            if custom_labels:
+                # 使用Zep labels
+                if defined_entity_types:
+                    matching_labels = [l for l in custom_labels if l in defined_entity_types]
+                    if not matching_labels:
+                        continue
+                    entity_type = matching_labels[0]
+                else:
+                    entity_type = custom_labels[0]
+                label_count += 1
+            elif classifications and node_uuid in classifications:
+                # Fallback: 使用classification结果
+                entity_type = classifications[node_uuid]
+                if defined_entity_types and entity_type not in defined_entity_types:
                     continue
-                entity_type = matching_labels[0]
+                classified_count += 1
             else:
-                entity_type = custom_labels[0]
-            
+                # 没有自定义label也没有classification，跳过
+                continue
+
             entity_types_found.add(entity_type)
             
             # 创建实体节点对象
@@ -321,7 +334,8 @@ class ZepEntityReader:
             filtered_entities.append(entity)
         
         logger.info(f"筛选完成: 总节点 {total_count}, 符合条件 {len(filtered_entities)}, "
-                   f"实体类型: {entity_types_found}")
+                   f"实体类型: {entity_types_found}, "
+                   f"来源: {label_count} từ labels, {classified_count} từ classification")
         
         return FilteredEntities(
             entities=filtered_entities,

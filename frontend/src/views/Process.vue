@@ -832,7 +832,15 @@ const pollTaskStatus = async (taskId) => {
       }
     }
   } catch (err) {
-    console.error('Poll task error:', err)
+    // Check if it's a 404 (task not found) - stop polling to avoid infinite 404s
+    if (err.response && err.response.status === 404) {
+      console.warn(`Task ${taskId} not found - stopping polling`)
+      stopPolling()
+      error.value = 'Task not found. The build may have been lost after backend restart.'
+      buildProgress.value = null
+    } else {
+      console.error('Poll task error:', err)
+    }
   }
 }
 

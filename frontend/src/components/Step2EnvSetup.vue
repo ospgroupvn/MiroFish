@@ -510,13 +510,13 @@
           </div>
 
           <div class="action-group dual">
-            <button 
+            <button
               class="action-btn secondary"
               @click="$emit('go-back')"
             >
               ← {{ $t('step2.backToGraphBuild') }}
             </button>
-            <button 
+            <button
               class="action-btn primary"
               :disabled="phase < 4"
               @click="handleStartSimulation"
@@ -525,6 +525,21 @@
             </button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Error State Panel -->
+    <div v-if="errorState" class="error-panel">
+      <div class="error-icon">⚠️</div>
+      <div class="error-title">{{ $t('step2.preparationFailed') }}</div>
+      <div class="error-message">{{ errorMessage }}</div>
+      <div class="error-actions">
+        <button class="action-btn secondary" @click="$emit('go-back')">
+          ← {{ $t('step2.backToGraphBuild') }}
+        </button>
+        <button class="action-btn primary" @click="handleRetry">
+          {{ $t('step2.retryPreparation') }}
+        </button>
       </div>
     </div>
 
@@ -639,7 +654,8 @@ import {
   getPrepareStatus,
   getSimulationProfilesRealtime,
   getSimulationConfig,
-  getSimulationConfigRealtime
+  getSimulationConfigRealtime,
+  getSimulation
 } from '../api/simulation'
 
 const { t } = useI18n()
@@ -665,6 +681,9 @@ const expectedTotal = ref(null)
 const simulationConfig = ref(null)
 const selectedProfile = ref(null)
 const showProfilesDetail = ref(true)
+const pollAttemptCount = ref(0) // 轮询次数计数
+const errorState = ref(false)
+const errorMessage = ref('')
 
 // 日志去重：记录上一次输出的关键信息
 let lastLoggedMessage = ''
@@ -775,7 +794,11 @@ const startPrepareSimulation = async () => {
     emit('update-status', 'error')
     return
   }
-  
+
+  // Reset error state
+  errorState.value = false
+  errorMessage.value = ''
+
   // 标记第一步完成，开始第二步
   phase.value = 1
   addLog(t('log.simInstanceCreated', { id: props.simulationId }))
@@ -848,24 +871,29 @@ const stopProfilesPolling = () => {
 
 const pollPrepareStatus = async () => {
   if (!taskId.value && !props.simulationId) return
-  
+
+  pollAttemptCount.value++
+
   try {
     const res = await getPrepareStatus({
       task_id: taskId.value,
       simulation_id: props.simulationId
     })
-    
+
     if (res.success && res.data) {
       const data = res.data
-      
+
+      // 重置连续空响应计数
+      pollAttemptCount.value = 0
+
       // 更新进度
       prepareProgress.value = data.progress || 0
       progressMessage.value = data.message || ''
-      
+
       // 解析阶段信息并输出详细日志
       if (data.progress_detail) {
         currentStage.value = data.progress_detail.current_stage_name || ''
-        
+
         // 输出详细进度日志（避免重复）
         const detail = data.progress_detail
         const logKey = `${detail.current_stage}-${detail.current_item}-${detail.total_items}`
@@ -890,7 +918,7 @@ const pollPrepareStatus = async () => {
           addLog(data.message)
         }
       }
-      
+
       // 检查是否完成
       if (data.status === 'completed' || data.status === 'ready' || data.already_prepared) {
         addLog(t('log.prepareComplete'))
@@ -898,13 +926,49 @@ const pollPrepareStatus = async () => {
         stopProfilesPolling()
         await loadPreparedData()
       } else if (data.status === 'failed') {
-        addLog(t('log.prepareFailedWithError', { error: data.error || t('common.unknownError') }))
+        const errorMsg = data.error || t('common.unknownError')
+        addLog(t('log.prepareFailedWithError', { error: errorMsg }))
+        errorState.value = true
+        errorMessage.value = errorMsg
         stopPolling()
         stopProfilesPolling()
+        emit('update-status', 'error')
       }
+    } else {
+      // API 返回 success: false
+      console.warn('轮询返回错误:', res.error)
     }
   } catch (err) {
     console.warn('轮询状态失败:', err)
+  }
+
+  // 检测长时间无进展的情况：如果轮询超过60次（2分钟）且进度没有变化，检查 simulation 状态
+  if (pollAttemptCount.value > 60 && prepareProgress.value < 100) {
+    try {
+      const simRes = await getSimulation(props.simulationId)
+      if (simRes.success && simRes.data) {
+        const simState = simRes.data
+        if (simState.status === 'failed') {
+          addLog(t('log.prepareFailedWithError', { error: simState.error || t('common.unknownError') }))
+          stopPolling()
+          stopProfilesPolling()
+          emit('update-status', 'error')
+          return
+        }
+      }
+    } catch (e) {
+      // 忽略检查错误
+    }
+  }
+
+  // 如果 progress 一直是 0 且轮询超过 180 次（6分钟），强制停止
+  if (pollAttemptCount.value > 180 && prepareProgress.value === 0) {
+    addLog(t('log.prepareTimeout'))
+    errorState.value = true
+    errorMessage.value = t('log.prepareTimeout')
+    stopPolling()
+    stopProfilesPolling()
+    emit('update-status', 'error')
   }
 }
 
@@ -954,7 +1018,8 @@ const fetchProfilesRealtime = async () => {
 
 // 配置轮询
 const startConfigPolling = () => {
-  configTimer = setInterval(fetchConfigRealtime, 2000)
+  configTimer = setInterval(fetchConfigRealtime, 3000)
+  configPollCount.value = 0
 }
 
 const stopConfigPolling = () => {
@@ -964,9 +1029,13 @@ const stopConfigPolling = () => {
   }
 }
 
+const configPollCount = ref(0)
+
 const fetchConfigRealtime = async () => {
   if (!props.simulationId) return
-  
+
+  configPollCount.value++
+
   try {
     const res = await getSimulationConfigRealtime(props.simulationId)
     
@@ -982,7 +1051,14 @@ const fetchConfigRealtime = async () => {
           addLog(t('log.generatingLLMConfig'))
         }
       }
-      
+
+      // 每 10 次轮询（约 30 秒）输出一个 "仍在生成中" 日志，让用户知道系统还在运行
+      if (configPollCount.value % 10 === 0 && !data.config_generated) {
+        const elapsedSec = Math.round(configPollCount.value * 3)
+        const mins = Math.round(elapsedSec / 60)
+        addLog(t('log.configStillGenerating', { minutes: mins }))
+      }
+
       // 如果配置已生成
       if (data.config_generated && data.config) {
         simulationConfig.value = data.config
@@ -1081,6 +1157,36 @@ onUnmounted(() => {
   stopProfilesPolling()
   stopConfigPolling()
 })
+
+// 处理失败重试
+const handleRetry = async () => {
+  addLog(t('log.retryingPreparation'))
+  phase.value = 0
+  prepareProgress.value = 0
+  currentStage.value = ''
+  profiles.value = []
+  simulationConfig.value = null
+  pollAttemptCount.value = 0
+  lastLoggedMessage = ''
+  lastLoggedProfileCount = 0
+  lastLoggedConfigStage = ''
+
+  // 重置 simulation 状态
+  try {
+    const res = await fetch(`/api/simulation/${props.simulationId}/reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    const data = await res.json()
+    if (data.success) {
+      addLog(t('log.simulationReset'))
+    }
+  } catch (e) {
+    // 忽略 reset 错误，直接重试
+  }
+
+  await startPrepareSimulation()
+}
 </script>
 
 <style scoped>
@@ -2601,5 +2707,43 @@ onUnmounted(() => {
 .modal-leave-to .profile-modal {
   transform: scale(0.95) translateY(10px);
   opacity: 0;
+}
+
+/* Error Panel */
+.error-panel {
+  background: #FFF5F5;
+  border: 1px solid #FECACA;
+  border-radius: 8px;
+  padding: 32px;
+  text-align: center;
+  margin-top: 20px;
+}
+
+.error-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.error-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #DC2626;
+  margin-bottom: 8px;
+}
+
+.error-message {
+  font-size: 14px;
+  color: #991B1B;
+  margin-bottom: 24px;
+  max-width: 500px;
+  margin-left: auto;
+  margin-right: auto;
+  line-height: 1.5;
+}
+
+.error-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
 }
 </style>

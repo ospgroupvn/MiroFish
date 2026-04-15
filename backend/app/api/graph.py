@@ -4,6 +4,7 @@
 """
 
 import os
+import atexit
 import traceback
 import threading
 from flask import request, jsonify
@@ -21,6 +22,28 @@ from ..models.project import ProjectManager, ProjectStatus
 
 # 获取日志器
 logger = get_logger('mirofish.api')
+
+# 全局后台线程管理
+_background_threads = []
+_shutdown_lock = threading.Lock()
+
+
+def _register_background_thread(thread):
+    """注册后台线程以便优雅关闭"""
+    with _shutdown_lock:
+        _background_threads.append(thread)
+
+
+def _shutdown_background_threads():
+    """优雅关闭所有后台线程"""
+    with _shutdown_lock:
+        threads = _background_threads[:]
+    for thread in threads:
+        if thread.is_alive():
+            thread.join(timeout=5.0)
+
+
+atexit.register(_shutdown_background_threads)
 
 
 def allowed_file(filename: str) -> bool:
@@ -424,12 +447,15 @@ def build_graph():
                 
                 # 添加文本（progress_callback 签名是 (msg, progress_ratio)）
                 def add_progress_callback(msg, progress_ratio):
-                    progress = 15 + int(progress_ratio * 40)  # 15% - 55%
-                    task_manager.update_task(
-                        task_id,
-                        message=msg,
-                        progress=progress
-                    )
+                    try:
+                        progress = 15 + int(progress_ratio * 40)  # 15% - 55%
+                        task_manager.update_task(
+                            task_id,
+                            message=msg,
+                            progress=progress
+                        )
+                    except Exception as e:
+                        build_logger.debug(f"Callback progress update failed: {e}")
                 
                 task_manager.update_task(
                     task_id,
@@ -452,15 +478,47 @@ def build_graph():
                 )
                 
                 def wait_progress_callback(msg, progress_ratio):
-                    progress = 55 + int(progress_ratio * 35)  # 55% - 90%
-                    task_manager.update_task(
-                        task_id,
-                        message=msg,
-                        progress=progress
-                    )
+                    try:
+                        progress = 55 + int(progress_ratio * 35)  # 55% - 90%
+                        task_manager.update_task(
+                            task_id,
+                            message=msg,
+                            progress=progress
+                        )
+                    except Exception as e:
+                        build_logger.debug(f"Callback progress update failed: {e}")
                 
                 builder._wait_for_episodes(episode_uuids, wait_progress_callback)
-                
+
+                # 分类节点（使用LLM将节点映射到实体类型）
+                task_manager.update_task(
+                    task_id,
+                    message=t('progress.classifyingNodes'),
+                    progress=90
+                )
+
+                try:
+                    def classification_progress_callback(msg, ratio):
+                        try:
+                            task_manager.update_task(
+                                task_id,
+                                message=msg,
+                                progress=90 + int(ratio * 5)  # 90% - 95%
+                            )
+                        except Exception as e:
+                            build_logger.debug(f"Classification callback failed: {e}")
+
+                    classifications = builder._classify_nodes(
+                        graph_id, ontology,
+                        progress_callback=classification_progress_callback
+                    )
+                    if classifications:
+                        build_logger.info(f"[{task_id}] 分类完成: {len(classifications)} 个节点")
+                    else:
+                        build_logger.warning(f"[{task_id}] 没有节点被分类")
+                except Exception as e:
+                    build_logger.warning(f"[{task_id}] 节点分类失败: {str(e)}，将继续但不包含分类")
+
                 # 获取图谱数据
                 task_manager.update_task(
                     task_id,
@@ -470,8 +528,14 @@ def build_graph():
                 graph_data = builder.get_graph_data(graph_id)
                 
                 # 更新项目状态
-                project.status = ProjectStatus.GRAPH_COMPLETED
-                ProjectManager.save_project(project)
+                # Reload project để tránh ghi đè node_classifications từ classification step
+                current_project = ProjectManager.get_project(project_id)
+                if current_project:
+                    current_project.status = ProjectStatus.GRAPH_COMPLETED
+                    ProjectManager.save_project(current_project)
+                else:
+                    project.status = ProjectStatus.GRAPH_COMPLETED
+                    ProjectManager.save_project(project)
                 
                 node_count = graph_data.get("node_count", 0)
                 edge_count = graph_data.get("edge_count", 0)
@@ -508,8 +572,9 @@ def build_graph():
                     error=traceback.format_exc()
                 )
         
-        # 启动后台线程
-        thread = threading.Thread(target=build_task, daemon=True)
+        # 启动后台线程（非daemon，确保任务完成前不会被强制终止）
+        thread = threading.Thread(target=build_task, daemon=False)
+        _register_background_thread(thread)
         thread.start()
         
         return jsonify({
@@ -555,8 +620,15 @@ def list_tasks():
     """
     列出所有任务
     """
-    tasks = TaskManager().list_tasks()
-    
+    task_manager = TaskManager()
+
+    # 定期清理旧任务（每100次请求清理一次）
+    import random
+    if random.randint(1, 100) <= 10:  # 10%概率触发清理
+        task_manager.cleanup_completed_tasks(max_count=50)
+
+    tasks = task_manager.list_tasks()
+
     return jsonify({
         "success": True,
         "data": [t.to_dict() for t in tasks],

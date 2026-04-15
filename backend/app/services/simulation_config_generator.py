@@ -1,13 +1,13 @@
 """
-模拟配置智能生成器
-使用LLM根据模拟需求、文档内容、图谱信息自动生成细致的模拟参数
-实现全程自动化，无需人工设置参数
+Bộ sinh thông minh cấu hình mô phỏng
+Sử dụng LLM tự động sinh tham số mô phỏng chi tiết dựa trên yêu cầu mô phỏng, nội dung tài liệu, thông tin đồ thị
+Triển khai tự động hoàn toàn, không cần thiết lập tham số thủ công
 
-采用分步生成策略，避免一次性生成过长内容导致失败：
-1. 生成时间配置
-2. 生成事件配置
-3. 分批生成Agent配置
-4. 生成平台配置
+Áp dụng chiến lược sinh từng bước, tránh sinh nội dung quá dài một lần dẫn đến thất bại:
+1. Sinh cấu hình thời gian
+2. Sinh cấu hình sự kiện
+3. Sinh cấu hình Agent theo lô
+4. Sinh cấu hình nền tảng
 """
 
 import json
@@ -25,156 +25,156 @@ from .zep_entity_reader import EntityNode, ZepEntityReader
 
 logger = get_logger('mirofish.simulation_config')
 
-# 中国作息时间配置（北京时间）
+# Cấu hình thời gian sinh hoạt Trung Quốc (giờ Bắc Kinh)
 CHINA_TIMEZONE_CONFIG = {
-    # 深夜时段（几乎无人活动）
+    # Khung giờ đêm khuya (hầu như không ai hoạt động)
     "dead_hours": [0, 1, 2, 3, 4, 5],
-    # 早间时段（逐渐醒来）
+    # Khung giờ sáng sớm (dần thức giấc)
     "morning_hours": [6, 7, 8],
-    # 工作时段
+    # Khung giờ làm việc
     "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-    # 晚间高峰（最活跃）
+    # Khung giờ cao điểm buổi tối (hoạt động mạnh nhất)
     "peak_hours": [19, 20, 21, 22],
-    # 夜间时段（活跃度下降）
+    # Khung giờ đêm (hoạt động giảm)
     "night_hours": [23],
-    # 活跃度系数
+    # Hệ số hoạt động
     "activity_multipliers": {
-        "dead": 0.05,      # 凌晨几乎无人
-        "morning": 0.4,    # 早间逐渐活跃
-        "work": 0.7,       # 工作时段中等
-        "peak": 1.5,       # 晚间高峰
-        "night": 0.5       # 深夜下降
+        "dead": 0.05,      # Sáng sớm hầu như không ai
+        "morning": 0.4,    # Sáng sớm dần hoạt động
+        "work": 0.7,       # Khung giờ làm việc trung bình
+        "peak": 1.5,       # Cao điểm buổi tối
+        "night": 0.5       # Đêm khuya giảm
     }
 }
 
 
 @dataclass
 class AgentActivityConfig:
-    """单个Agent的活动配置"""
+    """Cấu hình hoạt động cho một Agent"""
     agent_id: int
     entity_uuid: str
     entity_name: str
     entity_type: str
     
-    # 活跃度配置 (0.0-1.0)
-    activity_level: float = 0.5  # 整体活跃度
+    # Cấu hình mức độ hoạt động (0.0-1.0)
+    activity_level: float = 0.5  # Mức độ hoạt động tổng thể
     
-    # 发言频率（每小时预期发言次数）
+    # Tần suất phát ngôn (số lần phát ngôn dự kiến mỗi giờ)
     posts_per_hour: float = 1.0
     comments_per_hour: float = 2.0
     
-    # 活跃时间段（24小时制，0-23）
+    # Khung giờ hoạt động (24 giờ, 0-23)
     active_hours: List[int] = field(default_factory=lambda: list(range(8, 23)))
     
-    # 响应速度（对热点事件的反应延迟，单位：模拟分钟）
+    # Tốc độ phản hồi (độ trễ phản ứng với sự kiện nóng, đơn vị: phút mô phỏng)
     response_delay_min: int = 5
     response_delay_max: int = 60
     
-    # 情感倾向 (-1.0到1.0，负面到正面)
+    # Khuynh hướng cảm xúc (-1.0 đến 1.0, tiêu cực đến tích cực)
     sentiment_bias: float = 0.0
     
-    # 立场（对特定话题的态度）
+    # Lập trường (thái độ với chủ đề cụ thể)
     stance: str = "neutral"  # supportive, opposing, neutral, observer
     
-    # 影响力权重（决定其发言被其他Agent看到的概率）
+    # Trọng số ảnh hưởng (quyết định xác suất phát ngôn được Agent khác nhìn thấy)
     influence_weight: float = 1.0
 
 
 @dataclass  
 class TimeSimulationConfig:
-    """时间模拟配置（基于中国人作息习惯）"""
-    # 模拟总时长（模拟小时数）
-    total_simulation_hours: int = 72  # 默认模拟72小时（3天）
+    """Cấu hình mô phỏng thời gian (dựa trên thói quen sinh hoạt người Trung Quốc)"""
+    # Tổng thời gian mô phỏng (số giờ mô phỏng)
+    total_simulation_hours: int = 72  # Mặc định mô phỏng 72 giờ (3 ngày)
     
-    # 每轮代表的时间（模拟分钟）- 默认60分钟（1小时），加快时间流速
+    # Thời gian mỗi vòng (phút mô phỏng) - mặc định 60 phút (1 giờ), tăng tốc dòng thời gian
     minutes_per_round: int = 60
     
-    # 每小时激活的Agent数量范围
+    # Phạm vi số Agent kích hoạt mỗi giờ
     agents_per_hour_min: int = 5
     agents_per_hour_max: int = 20
     
-    # 高峰时段（晚间19-22点，中国人最活跃的时间）
+    # Khung giờ cao điểm (19-22 giờ tối, thời gian người Trung Quốc hoạt động mạnh nhất)
     peak_hours: List[int] = field(default_factory=lambda: [19, 20, 21, 22])
     peak_activity_multiplier: float = 1.5
     
-    # 低谷时段（凌晨0-5点，几乎无人活动）
+    # Khung giờ thấp điểm (0-5 giờ sáng, hầu như không ai hoạt động)
     off_peak_hours: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5])
-    off_peak_activity_multiplier: float = 0.05  # 凌晨活跃度极低
+    off_peak_activity_multiplier: float = 0.05  # Sáng sớm hoạt động cực thấp
     
-    # 早间时段
+    # Khung giờ sáng sớm
     morning_hours: List[int] = field(default_factory=lambda: [6, 7, 8])
     morning_activity_multiplier: float = 0.4
     
-    # 工作时段
+    # Khung giờ làm việc
     work_hours: List[int] = field(default_factory=lambda: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
     work_activity_multiplier: float = 0.7
 
 
 @dataclass
 class EventConfig:
-    """事件配置"""
-    # 初始事件（模拟开始时的触发事件）
+    """Cấu hình sự kiện"""
+    # Sự kiện ban đầu (sự kiện kích hoạt khi bắt đầu mô phỏng)
     initial_posts: List[Dict[str, Any]] = field(default_factory=list)
     
-    # 定时事件（在特定时间触发的事件）
+    # Sự kiện định kỳ (sự kiện kích hoạt ở thời điểm cụ thể)
     scheduled_events: List[Dict[str, Any]] = field(default_factory=list)
     
-    # 热点话题关键词
+    # Từ khóa chủ đề nóng
     hot_topics: List[str] = field(default_factory=list)
     
-    # 舆论引导方向
+    # Hướng dẫn dư luận
     narrative_direction: str = ""
 
 
 @dataclass
 class PlatformConfig:
-    """平台特定配置"""
+    """Cấu hình đặc thù nền tảng"""
     platform: str  # twitter or reddit
     
-    # 推荐算法权重
-    recency_weight: float = 0.4  # 时间新鲜度
-    popularity_weight: float = 0.3  # 热度
-    relevance_weight: float = 0.3  # 相关性
+    # Trọng số thuật toán đề xuất
+    recency_weight: float = 0.4  # Độ tươi thời gian
+    popularity_weight: float = 0.3  # Độ nóng
+    relevance_weight: float = 0.3  # Độ tương quan
     
-    # 病毒传播阈值（达到多少互动后触发扩散）
+    # Ngưỡng lan truyền virus (đạt bao nhiêu tương tác thì kích hoạt lan tỏa)
     viral_threshold: int = 10
     
-    # 回声室效应强度（相似观点聚集程度）
+    # Cường độ hiệu ứng buồng vang (mức độ tập trung quan điểm tương đồng)
     echo_chamber_strength: float = 0.5
 
 
 @dataclass
 class SimulationParameters:
-    """完整的模拟参数配置"""
-    # 基础信息
+    """Cấu hình tham số mô phỏng đầy đủ"""
+    # Thông tin cơ bản
     simulation_id: str
     project_id: str
     graph_id: str
     simulation_requirement: str
     
-    # 时间配置
+    # Cấu hình thời gian
     time_config: TimeSimulationConfig = field(default_factory=TimeSimulationConfig)
     
-    # Agent配置列表
+    # Danh sách cấu hình Agent
     agent_configs: List[AgentActivityConfig] = field(default_factory=list)
     
-    # 事件配置
+    # Cấu hình sự kiện
     event_config: EventConfig = field(default_factory=EventConfig)
     
-    # 平台配置
+    # Cấu hình nền tảng
     twitter_config: Optional[PlatformConfig] = None
     reddit_config: Optional[PlatformConfig] = None
     
-    # LLM配置
+    # Cấu hình LLM
     llm_model: str = ""
     llm_base_url: str = ""
     
-    # 生成元数据
+    # Siêu dữ liệu sinh
     generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    generation_reasoning: str = ""  # LLM的推理说明
+    generation_reasoning: str = ""  # Giải thích suy luận của LLM
     
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
+        """Chuyển sang từ điển"""
         time_dict = asdict(self.time_config)
         return {
             "simulation_id": self.simulation_id,
@@ -193,34 +193,34 @@ class SimulationParameters:
         }
     
     def to_json(self, indent: int = 2) -> str:
-        """转换为JSON字符串"""
+        """Chuyển sang chuỗi JSON"""
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
 
 
 class SimulationConfigGenerator:
     """
-    模拟配置智能生成器
+    Bộ sinh thông minh cấu hình mô phỏng
     
-    使用LLM分析模拟需求、文档内容、图谱实体信息，
-    自动生成最佳的模拟参数配置
+    Sử dụng LLM phân tích yêu cầu mô phỏng, nội dung tài liệu, thông tin entity đồ thị,
+    Tự động sinh cấu hình tham số mô phỏng tối ưu
     
-    采用分步生成策略：
-    1. 生成时间配置和事件配置（轻量级）
-    2. 分批生成Agent配置（每批10-20个）
-    3. 生成平台配置
+    Áp dụng chiến lược sinh từng bước:
+    1. Sinh cấu hình thời gian và sự kiện (nhẹ)
+    2. Sinh cấu hình Agent theo lô (mỗi lô 10-20 cái)
+    3. Sinh cấu hình nền tảng
     """
     
-    # 上下文最大字符数
+    # Số ký tự tối đa ngữ cảnh
     MAX_CONTEXT_LENGTH = 50000
-    # 每批生成的Agent数量
+    # Số Agent sinh mỗi lô
     AGENTS_PER_BATCH = 15
     
-    # 各步骤的上下文截断长度（字符数）
-    TIME_CONFIG_CONTEXT_LENGTH = 10000   # 时间配置
-    EVENT_CONFIG_CONTEXT_LENGTH = 8000   # 事件配置
-    ENTITY_SUMMARY_LENGTH = 300          # 实体摘要
-    AGENT_SUMMARY_LENGTH = 300           # Agent配置中的实体摘要
-    ENTITIES_PER_TYPE_DISPLAY = 20       # 每类实体显示数量
+    # Độ dài cắt ngữ cảnh các bước (số ký tự)
+    TIME_CONFIG_CONTEXT_LENGTH = 10000   # Cấu hình thời gian
+    EVENT_CONFIG_CONTEXT_LENGTH = 8000   # Cấu hình sự kiện
+    ENTITY_SUMMARY_LENGTH = 300          # Tóm tắt entity
+    AGENT_SUMMARY_LENGTH = 300           # Tóm tắt entity trong cấu hình Agent
+    ENTITIES_PER_TYPE_DISPLAY = 20       # Số lượng hiển thị mỗi loại entity
     
     def __init__(
         self,
@@ -233,7 +233,7 @@ class SimulationConfigGenerator:
         self.model_name = model_name or Config.LLM_MODEL_NAME
         
         if not self.api_key:
-            raise ValueError("LLM_API_KEY 未配置")
+            raise ValueError("LLM_API_KEY chưa được cấu hình")
         
         self.client = OpenAI(
             api_key=self.api_key,
@@ -253,27 +253,27 @@ class SimulationConfigGenerator:
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> SimulationParameters:
         """
-        智能生成完整的模拟配置（分步生成）
+        Sinh thông minh cấu hình mô phỏng đầy đủ (sinh từng bước)
         
         Args:
-            simulation_id: 模拟ID
-            project_id: 项目ID
-            graph_id: 图谱ID
-            simulation_requirement: 模拟需求描述
-            document_text: 原始文档内容
-            entities: 过滤后的实体列表
-            enable_twitter: 是否启用Twitter
-            enable_reddit: 是否启用Reddit
-            progress_callback: 进度回调函数(current_step, total_steps, message)
+            simulation_id: ID mô phỏng
+            project_id: ID dự án
+            graph_id: ID đồ thị
+            simulation_requirement: Mô tả yêu cầu mô phỏng
+            document_text: Nội dung tài liệu gốc
+            entities: Danh sách entity đã lọc
+            enable_twitter: Có bật Twitter không
+            enable_reddit: Có bật Reddit không
+            progress_callback: Hàm callback tiến độ (current_step, total_steps, message)
             
         Returns:
-            SimulationParameters: 完整的模拟参数
+            SimulationParameters: Tham số mô phỏng đầy đủ
         """
-        logger.info(f"开始智能生成模拟配置: simulation_id={simulation_id}, 实体数={len(entities)}")
+        logger.info(f"Bắt đầu sinh thông minh cấu hình mô phỏng: simulation_id={simulation_id}, số entity={len(entities)}")
         
-        # 计算总步骤数
+        # Tính tổng số bước
         num_batches = math.ceil(len(entities) / self.AGENTS_PER_BATCH)
-        total_steps = 3 + num_batches  # 时间配置 + 事件配置 + N批Agent + 平台配置
+        total_steps = 3 + num_batches  # Cấu hình thời gian + Cấu hình sự kiện + N lô Agent + Cấu hình nền tảng
         current_step = 0
         
         def report_progress(step: int, message: str):
@@ -283,7 +283,7 @@ class SimulationConfigGenerator:
                 progress_callback(step, total_steps, message)
             logger.info(f"[{step}/{total_steps}] {message}")
         
-        # 1. 构建基础上下文信息
+        # 1. Xây dựng thông tin ngữ cảnh cơ bản
         context = self._build_context(
             simulation_requirement=simulation_requirement,
             document_text=document_text,
@@ -292,20 +292,23 @@ class SimulationConfigGenerator:
         
         reasoning_parts = []
         
-        # ========== 步骤1: 生成时间配置 ==========
+        # ========== Bước 1: Sinh cấu hình thời gian ==========
         report_progress(1, t('progress.generatingTimeConfig'))
+        logger.info("Bước 1/3: Đang sinh cấu hình thời gian...")
         num_entities = len(entities)
         time_config_result = self._generate_time_config(context, num_entities)
         time_config = self._parse_time_config(time_config_result, num_entities)
         reasoning_parts.append(f"{t('progress.timeConfigLabel')}: {time_config_result.get('reasoning', t('common.success'))}")
         
-        # ========== 步骤2: 生成事件配置 ==========
+        # ========== Bước 2: Sinh cấu hình sự kiện ==========
         report_progress(2, t('progress.generatingEventConfig'))
+        logger.info("Bước 2/3: Đang sinhCấu hình sự kiện...")
         event_config_result = self._generate_event_config(context, simulation_requirement, entities)
         event_config = self._parse_event_config(event_config_result)
         reasoning_parts.append(f"{t('progress.eventConfigLabel')}: {event_config_result.get('reasoning', t('common.success'))}")
         
-        # ========== 步骤3-N: 分批生成Agent配置 ==========
+        # ========== Bước 3-N: Sinh cấu hình Agent theo lô ==========
+        logger.info(f"Bước 3/3: Đang sinh cấu hình Agent theo lô, tổng {num_batches} lô, mỗi lô {self.AGENTS_PER_BATCH} Agent...")
         all_agent_configs = []
         for batch_idx in range(num_batches):
             start_idx = batch_idx * self.AGENTS_PER_BATCH
@@ -316,7 +319,8 @@ class SimulationConfigGenerator:
                 3 + batch_idx,
                 t('progress.generatingAgentConfig', start=start_idx + 1, end=end_idx, total=len(entities))
             )
-            
+            logger.info(f"  Lô {batch_idx + 1}/{num_batches}: Sinh Agent {start_idx + 1}-{end_idx} cấu hình...")
+
             batch_configs = self._generate_agent_configs_batch(
                 context=context,
                 entities=batch_entities,
@@ -327,14 +331,15 @@ class SimulationConfigGenerator:
         
         reasoning_parts.append(t('progress.agentConfigResult', count=len(all_agent_configs)))
         
-        # ========== 为初始帖子分配发布者 Agent ==========
-        logger.info("为初始帖子分配合适的发布者 Agent...")
+        # ========== Phân bổ Agent phát hành cho bài đăng ban đầu ==========
+        logger.info("Phân bổ Agent phát hành phù hợp cho bài đăng ban đầu...")
         event_config = self._assign_initial_post_agents(event_config, all_agent_configs)
         assigned_count = len([p for p in event_config.initial_posts if p.get("poster_agent_id") is not None])
         reasoning_parts.append(t('progress.postAssignResult', count=assigned_count))
         
-        # ========== 最后一步: 生成平台配置 ==========
+        # ========== Bước cuối: Sinh cấu hình nền tảng ==========
         report_progress(total_steps, t('progress.generatingPlatformConfig'))
+        logger.info("Bước cuối: Đang sinh cấu hình nền tảng...")
         twitter_config = None
         reddit_config = None
         
@@ -358,7 +363,7 @@ class SimulationConfigGenerator:
                 echo_chamber_strength=0.6
             )
         
-        # 构建最终参数
+        # Xây dựng tham số cuối cùng
         params = SimulationParameters(
             simulation_id=simulation_id,
             project_id=project_id,
@@ -373,9 +378,12 @@ class SimulationConfigGenerator:
             llm_base_url=self.base_url,
             generation_reasoning=" | ".join(reasoning_parts)
         )
-        
-        logger.info(f"模拟配置生成完成: {len(params.agent_configs)} 个Agent配置")
-        
+
+        logger.info(f"Sinh cấu hình mô phỏng hoàn thành: {len(params.agent_configs)} cấu hình Agent")
+        logger.info(f"  ├─ Cấu hình thời gian: {params.time_config.total_simulation_hours}giờ, {params.time_config.minutes_per_round}phút/vòng")
+        logger.info(f"  ├─ Cấu hình sự kiện: {len(params.event_config.initial_posts)}bài đăng ban đầu, {len(params.event_config.hot_topics)}chủ đề nóng")
+        logger.info(f"  ├─ Cấu hình nền tảng: Twitter={'✓' if params.twitter_config else '✗'}, Reddit={'✓' if params.reddit_config else '✗'}")
+
         return params
     
     def _build_context(
@@ -384,33 +392,33 @@ class SimulationConfigGenerator:
         document_text: str,
         entities: List[EntityNode]
     ) -> str:
-        """构建LLM上下文，截断到最大长度"""
+        """Xây dựng ngữ cảnh LLM, cắt đến độ dài tối đa"""
         
-        # 实体摘要
+        # Tóm tắt entity
         entity_summary = self._summarize_entities(entities)
         
-        # 构建上下文
+        # Xây dựng ngữ cảnh
         context_parts = [
-            f"## 模拟需求\n{simulation_requirement}",
-            f"\n## 实体信息 ({len(entities)}个)\n{entity_summary}",
+            f"## Yêu cầu mô phỏng\n{simulation_requirement}",
+            f"\n## Thông tin entity ({len(entities)}cái)\n{entity_summary}",
         ]
         
         current_length = sum(len(p) for p in context_parts)
-        remaining_length = self.MAX_CONTEXT_LENGTH - current_length - 500  # 留500字符余量
+        remaining_length = self.MAX_CONTEXT_LENGTH - current_length - 500  # Để dư 500 ký tự
         
         if remaining_length > 0 and document_text:
             doc_text = document_text[:remaining_length]
             if len(document_text) > remaining_length:
-                doc_text += "\n...(文档已截断)"
-            context_parts.append(f"\n## 原始文档内容\n{doc_text}")
+                doc_text += "\n...(Tài liệu đã bị cắt)"
+            context_parts.append(f"\n## Nội dung tài liệu gốc\n{doc_text}")
         
         return "\n".join(context_parts)
     
     def _summarize_entities(self, entities: List[EntityNode]) -> str:
-        """生成实体摘要"""
+        """Sinh tóm tắt entity"""
         lines = []
         
-        # 按类型分组
+        # Nhóm theo loại
         by_type: Dict[str, List[EntityNode]] = {}
         for e in entities:
             t = e.get_entity_type() or "Unknown"
@@ -419,27 +427,30 @@ class SimulationConfigGenerator:
             by_type[t].append(e)
         
         for entity_type, type_entities in by_type.items():
-            lines.append(f"\n### {entity_type} ({len(type_entities)}个)")
-            # 使用配置的显示数量和摘要长度
+            lines.append(f"\n### {entity_type} ({len(type_entities)}cái)")
+            # Sử dụng số lượng hiển thị và độ dài tóm tắt đã cấu hình
             display_count = self.ENTITIES_PER_TYPE_DISPLAY
             summary_len = self.ENTITY_SUMMARY_LENGTH
             for e in type_entities[:display_count]:
                 summary_preview = (e.summary[:summary_len] + "...") if len(e.summary) > summary_len else e.summary
                 lines.append(f"- {e.name}: {summary_preview}")
             if len(type_entities) > display_count:
-                lines.append(f"  ... 还有 {len(type_entities) - display_count} 个")
+                lines.append(f"  ... còn {len(type_entities) - display_count} cái")
         
         return "\n".join(lines)
     
     def _call_llm_with_retry(self, prompt: str, system_prompt: str) -> Dict[str, Any]:
-        """带重试的LLM调用，包含JSON修复逻辑"""
+        """Gọi LLM có retry, bao gồm logic sửa JSON"""
         import re
-        
+
         max_attempts = 3
         last_error = None
-        
+
+        logger.info(f"Bắt đầu gọi LLM sinh cấu hình...")
+
         for attempt in range(max_attempts):
             try:
+                logger.info(f"  LLM call attempt {attempt + 1}/{max_attempts}...")
                 response = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=[
@@ -447,25 +458,27 @@ class SimulationConfigGenerator:
                         {"role": "user", "content": prompt}
                     ],
                     response_format={"type": "json_object"},
-                    temperature=0.7 - (attempt * 0.1)  # 每次重试降低温度
-                    # 不设置max_tokens，让LLM自由发挥
+                    temperature=0.7 - (attempt * 0.1)  # Mỗi lần retry giảm nhiệt độ
+                    # Không đặt max_tokens, để LLM tự do phát huy
                 )
                 
                 content = response.choices[0].message.content
                 finish_reason = response.choices[0].finish_reason
-                
-                # 检查是否被截断
+
+                logger.info(f"  ✓ LLM response received (finish_reason={finish_reason})")
+
+                # Kiểm tra có bị cắt không
                 if finish_reason == 'length':
-                    logger.warning(f"LLM输出被截断 (attempt {attempt+1})")
+                    logger.warning(f"Đầu ra LLM bị cắt (lần thử {attempt+1})")
                     content = self._fix_truncated_json(content)
                 
-                # 尝试解析JSON
+                # Thử phân tích JSON
                 try:
                     return json.loads(content)
                 except json.JSONDecodeError as e:
-                    logger.warning(f"JSON解析失败 (attempt {attempt+1}): {str(e)[:80]}")
+                    logger.warning(f"Phân tích JSON thất bại (lần thử {attempt+1}): {str(e)[:80]}")
                     
-                    # 尝试修复JSON
+                    # Thử sửa JSON
                     fixed = self._try_fix_config_json(content)
                     if fixed:
                         return fixed
@@ -473,44 +486,44 @@ class SimulationConfigGenerator:
                     last_error = e
                     
             except Exception as e:
-                logger.warning(f"LLM调用失败 (attempt {attempt+1}): {str(e)[:80]}")
+                logger.warning(f"Gọi LLM thất bại (lần thử {attempt+1}): {str(e)[:80]}")
                 last_error = e
                 import time
                 time.sleep(2 * (attempt + 1))
         
-        raise last_error or Exception("LLM调用失败")
+        raise last_error or Exception("Gọi LLM thất bại")
     
     def _fix_truncated_json(self, content: str) -> str:
-        """修复被截断的JSON"""
+        """Sửa JSON bị cắt"""
         content = content.strip()
         
-        # 计算未闭合的括号
+        # Tính số ngoặc chưa đóng
         open_braces = content.count('{') - content.count('}')
         open_brackets = content.count('[') - content.count(']')
         
-        # 检查是否有未闭合的字符串
+        # Kiểm tra có chuỗi chưa đóng không
         if content and content[-1] not in '",}]':
             content += '"'
         
-        # 闭合括号
+        # Đóng ngoặc
         content += ']' * open_brackets
         content += '}' * open_braces
         
         return content
     
     def _try_fix_config_json(self, content: str) -> Optional[Dict[str, Any]]:
-        """尝试修复配置JSON"""
+        """Thử sửa JSON cấu hình"""
         import re
         
-        # 修复被截断的情况
+        # Sửa trường hợp bị cắt
         content = self._fix_truncated_json(content)
         
-        # 提取JSON部分
+        # Trích xuất phần JSON
         json_match = re.search(r'\{[\s\S]*\}', content)
         if json_match:
             json_str = json_match.group()
             
-            # 移除字符串中的换行符
+            # Xóa ký tự xuống dòng trong chuỗi
             def fix_string(match):
                 s = match.group(0)
                 s = s.replace('\n', ' ').replace('\r', ' ')
@@ -522,7 +535,7 @@ class SimulationConfigGenerator:
             try:
                 return json.loads(json_str)
             except:
-                # 尝试移除所有控制字符
+                # Thử xóa tất cả ký tự điều khiển
                 json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', json_str)
                 json_str = re.sub(r'\s+', ' ', json_str)
                 try:
@@ -533,35 +546,35 @@ class SimulationConfigGenerator:
         return None
     
     def _generate_time_config(self, context: str, num_entities: int) -> Dict[str, Any]:
-        """生成时间配置"""
-        # 使用配置的上下文截断长度
+        """Sinh cấu hình thời gian"""
+        # Sử dụng độ dài cắt ngữ cảnh đã cấu hình
         context_truncated = context[:self.TIME_CONFIG_CONTEXT_LENGTH]
         
-        # 计算最大允许值（80%的agent数）
+        # Tính giá trị tối đa cho phép (80% số agent)
         max_agents_allowed = max(1, int(num_entities * 0.9))
         
-        prompt = f"""基于以下模拟需求，生成时间模拟配置。
+        prompt = f"""Dựa trên yêu cầu mô phỏng sau, sinh cấu hình mô phỏng thời gian.
 
 {context_truncated}
 
-## 任务
-请生成时间配置JSON。
+## Nhiệm vụ
+Hãy sinh cấu hình thời gian dưới dạng JSON.
 
-### 基本原则（仅供参考，需根据具体事件和参与群体灵活调整）：
-- 请根据模拟场景推断目标用户群体所在时区和作息习惯，以下为东八区(UTC+8)的参考示例
-- 凌晨0-5点几乎无人活动（活跃度系数0.05）
-- 早上6-8点逐渐活跃（活跃度系数0.4）
-- 工作时间9-18点中等活跃（活跃度系数0.7）
-- 晚间19-22点是高峰期（活跃度系数1.5）
-- 23点后活跃度下降（活跃度系数0.5）
-- 一般规律：凌晨低活跃、早间渐增、工作时段中等、晚间高峰
-- **重要**：以下示例值仅供参考，你需要根据事件性质、参与群体特点来调整具体时段
-  - 例如：学生群体高峰可能是21-23点；媒体全天活跃；官方机构只在工作时间
-  - 例如：突发热点可能导致深夜也有讨论，off_peak_hours 可适当缩短
+### Nguyên tắc cơ bản (chỉ để tham khảo, cần linh hoạt điều chỉnh theo sự kiện và nhóm tham gia cụ thể):
+- Vui lòng suy luận múi giờ và thói quen sinh hoạt của nhóm người dùng mục tiêu theo kịch bản mô phỏng, dưới đây là ví dụ tham khảo cho múi giờ Đông Tám (UTC+8)
+- Khung giờ đêm khuya 0-5 giờ hầu như không ai hoạt động (Hệ số hoạt động 0.05)
+- Khung giờ sáng sớm 6-8 giờ dần thức giấc (Hệ số hoạt động 0.4)
+- Khung giờ làm việc 9-18 giờ hoạt động trung bình (Hệ số hoạt động 0.7)
+- Khung giờ cao điểm buổi tối 19-22 giờ (Hệ số hoạt động 1.5)
+- Sau 23 giờ hoạt động giảm (Hệ số hoạt động 0.5)
+- Quy luật chung: Đêm khuya hoạt động thấp, sáng sớm tăng dần, Khung giờ làm việc trung bình, Cao điểm buổi tối
+- **Quan trọng**: Các giá trị ví dụ sau chỉ để tham khảo, bạn cần điều chỉnh khung giờ cụ thể theo tính chất sự kiện, đặc điểm nhóm tham gia
+  - Ví dụ: nhóm sinh viên cao điểm có thể là 21-23 giờ; truyền thông hoạt động cả ngày; cơ quan chính thức chỉ trong giờ làm
+  - Ví dụ: điểm nóng đột phát có thể khiến đêm khuya cũng có thảo luận, off_peak_hours có thể rút ngắn phù hợp
 
-### 返回JSON格式（不要markdown）
+### Trả về định dạng JSON (không markdown)
 
-示例：
+Ví dụ:
 {{
     "total_simulation_hours": 72,
     "minutes_per_round": 60,
@@ -571,71 +584,71 @@ class SimulationConfigGenerator:
     "off_peak_hours": [0, 1, 2, 3, 4, 5],
     "morning_hours": [6, 7, 8],
     "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-    "reasoning": "针对该事件的时间配置说明"
+    "reasoning": "Giải thích cấu hình thời gian cho sự kiện này"
 }}
 
-字段说明：
-- total_simulation_hours (int): 模拟总时长，24-168小时，突发事件短、持续话题长
-- minutes_per_round (int): 每轮时长，30-120分钟，建议60分钟
-- agents_per_hour_min (int): 每小时最少激活Agent数（取值范围: 1-{max_agents_allowed}）
-- agents_per_hour_max (int): 每小时最多激活Agent数（取值范围: 1-{max_agents_allowed}）
-- peak_hours (int数组): 高峰时段，根据事件参与群体调整
-- off_peak_hours (int数组): 低谷时段，通常深夜凌晨
-- morning_hours (int数组): 早间时段
-- work_hours (int数组): 工作时段
-- reasoning (string): 简要说明为什么这样配置"""
+Giải thích trường:
+- total_simulation_hours (int): Tổng thời gian mô phỏng, 24-168 giờ, sự kiện đột phát ngắn, chủ đề kéo dài lâu
+- minutes_per_round (int): Thời gian mỗi vòng, 30-120 phút, khuyến nghị 60 phút
+- agents_per_hour_min (int): Số Agent kích hoạt tối thiểu mỗi giờ (phạm vi: 1-{max_agents_allowed})
+- agents_per_hour_max (int): Số Agent kích hoạt tối đa mỗi giờ (phạm vi: 1-{max_agents_allowed})
+- peak_hours (mảng int): Khung giờ cao điểm, điều chỉnh theo nhóm tham gia sự kiện
+- off_peak_hours (mảng int): Khung giờ thấp điểm, thường đêm khuya sáng sớm
+- morning_hours (mảng int): Khung giờ sáng sớm
+- work_hours (mảng int): Khung giờ làm việc
+- reasoning (string): Giải thích ngắn gọn tại sao cấu hình như vậy"""
 
-        system_prompt = "你是社交媒体模拟专家。返回纯JSON格式，时间配置需符合模拟场景中目标用户群体的作息习惯。"
+        system_prompt = "Bạn là chuyên gia mô phỏng mạng xã hội. Trả về định dạng JSON thuần, cấu hình thời gian phải phù hợp với thói quen sinh hoạt của nhóm người dùng mục tiêu trong kịch bản mô phỏng."
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}"
 
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
         except Exception as e:
-            logger.warning(f"时间配置LLM生成失败: {e}, 使用默认配置")
+            logger.warning(f"Sinh cấu hình thời gian LLM thất bại: {e}, Sử dụng cấu hình mặc định")
             return self._get_default_time_config(num_entities)
     
     def _get_default_time_config(self, num_entities: int) -> Dict[str, Any]:
-        """获取默认时间配置（中国人作息）"""
+        """Lấy cấu hình thời gian mặc định (sinh hoạt người Trung Quốc)"""
         return {
             "total_simulation_hours": 72,
-            "minutes_per_round": 60,  # 每轮1小时，加快时间流速
+            "minutes_per_round": 60,  # Mỗi vòng 1 giờ, tăng tốc dòng thời gian
             "agents_per_hour_min": max(1, num_entities // 15),
             "agents_per_hour_max": max(5, num_entities // 5),
             "peak_hours": [19, 20, 21, 22],
             "off_peak_hours": [0, 1, 2, 3, 4, 5],
             "morning_hours": [6, 7, 8],
             "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-            "reasoning": "使用默认中国人作息配置（每轮1小时）"
+            "reasoning": "Sử dụng cấu hình sinh hoạt người Trung Quốc mặc định (mỗi vòng 1 giờ)"
         }
     
     def _parse_time_config(self, result: Dict[str, Any], num_entities: int) -> TimeSimulationConfig:
-        """解析时间配置结果，并验证agents_per_hour值不超过总agent数"""
-        # 获取原始值
+        """Phân tích kết quả cấu hình thời gian, kiểm tra giá trị agents_per_hour không vượt quá tổng số agent"""
+        # Lấy giá trị gốc
         agents_per_hour_min = result.get("agents_per_hour_min", max(1, num_entities // 15))
         agents_per_hour_max = result.get("agents_per_hour_max", max(5, num_entities // 5))
         
-        # 验证并修正：确保不超过总agent数
+        # Kiểm tra và sửa: Đảm bảo không vượt quá tổng số agent
         if agents_per_hour_min > num_entities:
-            logger.warning(f"agents_per_hour_min ({agents_per_hour_min}) 超过总Agent数 ({num_entities})，已修正")
+            logger.warning(f"agents_per_hour_min ({agents_per_hour_min}) vượt quá tổng số Agent ({num_entities})，đã sửa")
             agents_per_hour_min = max(1, num_entities // 10)
         
         if agents_per_hour_max > num_entities:
-            logger.warning(f"agents_per_hour_max ({agents_per_hour_max}) 超过总Agent数 ({num_entities})，已修正")
+            logger.warning(f"agents_per_hour_max ({agents_per_hour_max}) vượt quá tổng số Agent ({num_entities})，đã sửa")
             agents_per_hour_max = max(agents_per_hour_min + 1, num_entities // 2)
         
-        # 确保 min < max
+        # Đảm bảo min < max
         if agents_per_hour_min >= agents_per_hour_max:
             agents_per_hour_min = max(1, agents_per_hour_max // 2)
-            logger.warning(f"agents_per_hour_min >= max，已修正为 {agents_per_hour_min}")
+            logger.warning(f"agents_per_hour_min >= max，đã sửa thành {agents_per_hour_min}")
         
         return TimeSimulationConfig(
             total_simulation_hours=result.get("total_simulation_hours", 72),
-            minutes_per_round=result.get("minutes_per_round", 60),  # 默认每轮1小时
+            minutes_per_round=result.get("minutes_per_round", 60),  # Mặc định mỗi vòng 1 giờ
             agents_per_hour_min=agents_per_hour_min,
             agents_per_hour_max=agents_per_hour_max,
             peak_hours=result.get("peak_hours", [19, 20, 21, 22]),
             off_peak_hours=result.get("off_peak_hours", [0, 1, 2, 3, 4, 5]),
-            off_peak_activity_multiplier=0.05,  # 凌晨几乎无人
+            off_peak_activity_multiplier=0.05,  # Sáng sớm hầu như không ai
             morning_hours=result.get("morning_hours", [6, 7, 8]),
             morning_activity_multiplier=0.4,
             work_hours=result.get("work_hours", list(range(9, 19))),
@@ -649,14 +662,14 @@ class SimulationConfigGenerator:
         simulation_requirement: str,
         entities: List[EntityNode]
     ) -> Dict[str, Any]:
-        """生成事件配置"""
+        """Sinh cấu hình sự kiện"""
         
-        # 获取可用的实体类型列表，供 LLM 参考
+        # Lấy danh sách loại entity khả dụng, để LLM tham khảo
         entity_types_available = list(set(
             e.get_entity_type() or "Unknown" for e in entities
         ))
         
-        # 为每种类型列出代表性实体名称
+        # Liệt kê tên entity đại diện cho mỗi loại
         type_examples = {}
         for e in entities:
             etype = e.get_entity_type() or "Unknown"
@@ -670,54 +683,54 @@ class SimulationConfigGenerator:
             for t, examples in type_examples.items()
         ])
         
-        # 使用配置的上下文截断长度
+        # Sử dụng độ dài cắt ngữ cảnh đã cấu hình
         context_truncated = context[:self.EVENT_CONFIG_CONTEXT_LENGTH]
         
-        prompt = f"""基于以下模拟需求，生成事件配置。
+        prompt = f"""Dựa trên yêu cầu mô phỏng sau, sinh cấu hình sự kiện.
 
-模拟需求: {simulation_requirement}
+Yêu cầu mô phỏng: {simulation_requirement}
 
 {context_truncated}
 
-## 可用实体类型及示例
+## Loại entity khả dụng và ví dụ
 {type_info}
 
-## 任务
-请生成事件配置JSON：
-- 提取热点话题关键词
-- 描述舆论发展方向
-- 设计初始帖子内容，**每个帖子必须指定 poster_type（发布者类型）**
+## Nhiệm vụ
+Hãy sinh cấu hình sự kiện dưới dạng JSON:
+- Trích xuất từ khóa chủ đề nóng
+- Mô tả hướng phát triển dư luận
+- Thiết kế nội dung bài đăng ban đầu, **mỗi bài phải chỉ định poster_type (loại người phát)**
 
-**重要**: poster_type 必须从上面的"可用实体类型"中选择，这样初始帖子才能分配给合适的 Agent 发布。
-例如：官方声明应由 Official/University 类型发布，新闻由 MediaOutlet 发布，学生观点由 Student 发布。
+**Quan trọng**: poster_type phải chọn từ "loại entity khả dụng" ở trên, như vậy bài đăng ban đầu mới có thể phân bổ cho Agent phù hợp phát hành.
+Ví dụ: Tuyên bố chính thức nên do loại Official/University phát, tin tức do MediaOutlet phát, quan điểm sinh viên do Student phát.
 
-返回JSON格式（不要markdown）：
+Trả về định dạng JSON (không markdown)：
 {{
-    "hot_topics": ["关键词1", "关键词2", ...],
-    "narrative_direction": "<舆论发展方向描述>",
+    "hot_topics": ["từ khóa1", "từ khóa2", ...],
+    "narrative_direction": "<mô tả hướng phát triển dư luận>",
     "initial_posts": [
-        {{"content": "帖子内容", "poster_type": "实体类型（必须从可用类型中选择）"}},
+        {{"content": "nội dung bài đăng", "poster_type": "loại entity (phải chọn từ loại khả dụng)"}},
         ...
     ],
-    "reasoning": "<简要说明>"
+    "reasoning": "<giải thích ngắn gọn>"
 }}"""
 
-        system_prompt = "你是舆论分析专家。返回纯JSON格式。注意 poster_type 必须精确匹配可用实体类型。"
+        system_prompt = "Bạn là chuyên gia phân tích dư luận. Trả về định dạng JSON thuần. Lưu ý poster_type phải khớp chính xác với các loại entity khả dụng."
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}\nIMPORTANT: The 'poster_type' field value MUST be in English PascalCase exactly matching the available entity types. Only 'content', 'narrative_direction', 'hot_topics' and 'reasoning' fields should use the specified language."
 
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
         except Exception as e:
-            logger.warning(f"事件配置LLM生成失败: {e}, 使用默认配置")
+            logger.warning(f"Sinh cấu hình sự kiện LLM thất bại: {e}, Sử dụng cấu hình mặc định")
             return {
                 "hot_topics": [],
                 "narrative_direction": "",
                 "initial_posts": [],
-                "reasoning": "使用默认配置"
+                "reasoning": "Sử dụng cấu hình mặc định"
             }
     
     def _parse_event_config(self, result: Dict[str, Any]) -> EventConfig:
-        """解析事件配置结果"""
+        """Phân tích kết quả cấu hình sự kiện"""
         return EventConfig(
             initial_posts=result.get("initial_posts", []),
             scheduled_events=[],
@@ -731,14 +744,14 @@ class SimulationConfigGenerator:
         agent_configs: List[AgentActivityConfig]
     ) -> EventConfig:
         """
-        为初始帖子分配合适的发布者 Agent
+        Phân bổ Agent phát hành phù hợp cho bài đăng ban đầu
         
-        根据每个帖子的 poster_type 匹配最合适的 agent_id
+        Khớp agent_id phù hợp nhất theo poster_type của mỗi bài
         """
         if not event_config.initial_posts:
             return event_config
         
-        # 按实体类型建立 agent 索引
+        # Thiết lập chỉ mục agent theo loại entity
         agents_by_type: Dict[str, List[AgentActivityConfig]] = {}
         for agent in agent_configs:
             etype = agent.entity_type.lower()
@@ -746,7 +759,7 @@ class SimulationConfigGenerator:
                 agents_by_type[etype] = []
             agents_by_type[etype].append(agent)
         
-        # 类型映射表（处理 LLM 可能输出的不同格式）
+        # Bảng ánh xạ loại (xử lý các định dạng khác nhau LLM có thể xuất)
         type_aliases = {
             "official": ["official", "university", "governmentagency", "government"],
             "university": ["university", "official"],
@@ -758,7 +771,7 @@ class SimulationConfigGenerator:
             "person": ["person", "student", "alumni"],
         }
         
-        # 记录每种类型已使用的 agent 索引，避免重复使用同一个 agent
+        # Ghi lại chỉ mục agent đã dùng cho mỗi loại, tránh dùng trùng một agent
         used_indices: Dict[str, int] = {}
         
         updated_posts = []
@@ -766,17 +779,17 @@ class SimulationConfigGenerator:
             poster_type = post.get("poster_type", "").lower()
             content = post.get("content", "")
             
-            # 尝试找到匹配的 agent
+            # Thử tìm agent khớp
             matched_agent_id = None
             
-            # 1. 直接匹配
+            # 1. Khớp trực tiếp
             if poster_type in agents_by_type:
                 agents = agents_by_type[poster_type]
                 idx = used_indices.get(poster_type, 0) % len(agents)
                 matched_agent_id = agents[idx].agent_id
                 used_indices[poster_type] = idx + 1
             else:
-                # 2. 使用别名匹配
+                # 2. Dùng bí danh khớp
                 for alias_key, aliases in type_aliases.items():
                     if poster_type in aliases or alias_key == poster_type:
                         for alias in aliases:
@@ -789,11 +802,11 @@ class SimulationConfigGenerator:
                     if matched_agent_id is not None:
                         break
             
-            # 3. 如果仍未找到，使用影响力最高的 agent
+            # 3. Nếu vẫn không tìm thấy, dùng agent có ảnh hưởng cao nhất
             if matched_agent_id is None:
-                logger.warning(f"未找到类型 '{poster_type}' 的匹配 Agent，使用影响力最高的 Agent")
+                logger.warning(f"Không tìm thấy loại '{poster_type}' Agent khớp, dùng Agent có ảnh hưởng cao nhất")
                 if agent_configs:
-                    # 按影响力排序，选择影响力最高的
+                    # Sắp xếp theo ảnh hưởng, chọn cái có ảnh hưởng cao nhất
                     sorted_agents = sorted(agent_configs, key=lambda a: a.influence_weight, reverse=True)
                     matched_agent_id = sorted_agents[0].agent_id
                 else:
@@ -805,7 +818,7 @@ class SimulationConfigGenerator:
                 "poster_agent_id": matched_agent_id
             })
             
-            logger.info(f"初始帖子分配: poster_type='{poster_type}' -> agent_id={matched_agent_id}")
+            logger.info(f"Phân bổ bài đăng ban đầu: poster_type='{poster_type}' -> agent_id={matched_agent_id}")
         
         event_config.initial_posts = updated_posts
         return event_config
@@ -817,9 +830,9 @@ class SimulationConfigGenerator:
         start_idx: int,
         simulation_requirement: str
     ) -> List[AgentActivityConfig]:
-        """分批生成Agent配置"""
+        """Sinh cấu hình Agent theo lô"""
         
-        # 构建实体信息（使用配置的摘要长度）
+        # Xây dựng thông tin entity (sử dụng độ dài tóm tắt đã cấu hình)
         entity_list = []
         summary_len = self.AGENT_SUMMARY_LENGTH
         for i, e in enumerate(entities):
@@ -830,59 +843,59 @@ class SimulationConfigGenerator:
                 "summary": e.summary[:summary_len] if e.summary else ""
             })
         
-        prompt = f"""基于以下信息，为每个实体生成社交媒体活动配置。
+        prompt = f"""Dựa trên thông tin sau, sinh cấu hình hoạt động mạng xã hội cho mỗi entity.
 
-模拟需求: {simulation_requirement}
+Yêu cầu mô phỏng: {simulation_requirement}
 
-## 实体列表
+## Danh sách entity
 ```json
 {json.dumps(entity_list, ensure_ascii=False, indent=2)}
 ```
 
-## 任务
-为每个实体生成活动配置，注意：
-- **时间符合目标用户群体作息**：以下为参考（东八区），请根据模拟场景调整
-- **官方机构**（University/GovernmentAgency）：活跃度低(0.1-0.3)，工作时间(9-17)活动，响应慢(60-240分钟)，影响力高(2.5-3.0)
-- **媒体**（MediaOutlet）：活跃度中(0.4-0.6)，全天活动(8-23)，响应快(5-30分钟)，影响力高(2.0-2.5)
-- **个人**（Student/Person/Alumni）：活跃度高(0.6-0.9)，主要晚间活动(18-23)，响应快(1-15分钟)，影响力低(0.8-1.2)
-- **公众人物/专家**：活跃度中(0.4-0.6)，影响力中高(1.5-2.0)
+## Nhiệm vụ
+Sinh cấu hình hoạt động cho mỗi entity, chú ý:
+- **Thời gian phù hợp sinh hoạt nhóm người dùng mục tiêu**: Dưới đây là tham khảo (Đông bát khu), vui lòng điều chỉnh theo kịch bản mô phỏng
+- **Cơ quan chính thức** (University/GovernmentAgency): Hoạt động thấp(0.1-0.3), hoạt động giờ làm(9-17), phản hồi chậm(60-240 phút), ảnh hưởng cao(2.5-3.0)
+- **Truyền thông** (MediaOutlet): Hoạt động trung bình(0.4-0.6), hoạt động cả ngày(8-23), phản hồi nhanh(5-30 phút), ảnh hưởng cao(2.0-2.5)
+- **Cá nhân** (Student/Person/Alumni): Hoạt động cao(0.6-0.9), chủ yếu hoạt động buổi tối(18-23), phản hồi nhanh(1-15 phút), ảnh hưởng thấp(0.8-1.2)
+- **Nhân vật công chúng/Chuyên gia**: Hoạt động trung bình(0.4-0.6), ảnh hưởng trung cao(1.5-2.0)
 
-返回JSON格式（不要markdown）：
+Trả về định dạng JSON (không markdown)：
 {{
     "agent_configs": [
         {{
-            "agent_id": <必须与输入一致>,
+            "agent_id": <phải nhất quán với đầu vào>,
             "activity_level": <0.0-1.0>,
-            "posts_per_hour": <发帖频率>,
-            "comments_per_hour": <评论频率>,
-            "active_hours": [<活跃小时列表，考虑中国人作息>],
-            "response_delay_min": <最小响应延迟分钟>,
-            "response_delay_max": <最大响应延迟分钟>,
-            "sentiment_bias": <-1.0到1.0>,
+            "posts_per_hour": <tần suất đăng bài>,
+            "comments_per_hour": <tần suất bình luận>,
+            "active_hours": [<danh sách giờ hoạt động, xem xét sinh hoạt người Trung Quốc>],
+            "response_delay_min": <phút trễ phản hồi tối thiểu>,
+            "response_delay_max": <phút trễ phản hồi tối đa>,
+            "sentiment_bias": <-1.0 đến 1.0>,
             "stance": "<supportive/opposing/neutral/observer>",
-            "influence_weight": <影响力权重>
+            "influence_weight": <trọng số ảnh hưởng>
         }},
         ...
     ]
 }}"""
 
-        system_prompt = "你是社交媒体行为分析专家。返回纯JSON，配置需符合模拟场景中目标用户群体的作息习惯。"
+        system_prompt = "Bạn là chuyên gia phân tích hành vi mạng xã hội. Trả về JSON thuần, cấu hình phải phù hợp với thói quen sinh hoạt của nhóm người dùng mục tiêu trong kịch bản mô phỏng."
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}\nIMPORTANT: The 'stance' field value MUST be one of the English strings: 'supportive', 'opposing', 'neutral', 'observer'. All JSON field names and numeric values must remain unchanged. Only natural language text fields should use the specified language."
 
         try:
             result = self._call_llm_with_retry(prompt, system_prompt)
             llm_configs = {cfg["agent_id"]: cfg for cfg in result.get("agent_configs", [])}
         except Exception as e:
-            logger.warning(f"Agent配置批次LLM生成失败: {e}, 使用规则生成")
+            logger.warning(f"Sinh cấu hình Agent theo lô LLM thất bại: {e}, Sinh theo quy tắc")
             llm_configs = {}
         
-        # 构建AgentActivityConfig对象
+        # Xây dựng đối tượng AgentActivityConfig
         configs = []
         for i, entity in enumerate(entities):
             agent_id = start_idx + i
             cfg = llm_configs.get(agent_id, {})
             
-            # 如果LLM没有生成，使用规则生成
+            # Nếu LLM không sinh, sinh theo quy tắc
             if not cfg:
                 cfg = self._generate_agent_config_by_rule(entity)
             
@@ -906,11 +919,11 @@ class SimulationConfigGenerator:
         return configs
     
     def _generate_agent_config_by_rule(self, entity: EntityNode) -> Dict[str, Any]:
-        """基于规则生成单个Agent配置（中国人作息）"""
+        """Sinh cấu hình Agent đơn theo quy tắc (sinh hoạt người Trung Quốc)"""
         entity_type = (entity.get_entity_type() or "Unknown").lower()
         
         if entity_type in ["university", "governmentagency", "ngo"]:
-            # 官方机构：工作时间活动，低频率，高影响力
+            # Cơ quan chính thức: Hoạt động giờ làm, tần suất thấp, ảnh hưởng cao
             return {
                 "activity_level": 0.2,
                 "posts_per_hour": 0.1,
@@ -923,7 +936,7 @@ class SimulationConfigGenerator:
                 "influence_weight": 3.0
             }
         elif entity_type in ["mediaoutlet"]:
-            # 媒体：全天活动，中等频率，高影响力
+            # Truyền thông: Hoạt động cả ngày, tần suất trung bình, ảnh hưởng cao
             return {
                 "activity_level": 0.5,
                 "posts_per_hour": 0.8,
@@ -936,7 +949,7 @@ class SimulationConfigGenerator:
                 "influence_weight": 2.5
             }
         elif entity_type in ["professor", "expert", "official"]:
-            # 专家/教授：工作+晚间活动，中等频率
+            # Chuyên gia/Giáo sư: Hoạt động làm+buổi tối, tần suất trung bình
             return {
                 "activity_level": 0.4,
                 "posts_per_hour": 0.3,
@@ -949,12 +962,12 @@ class SimulationConfigGenerator:
                 "influence_weight": 2.0
             }
         elif entity_type in ["student"]:
-            # 学生：晚间为主，高频率
+            # Sinh viên: Chủ yếu buổi tối, tần suất cao
             return {
                 "activity_level": 0.8,
                 "posts_per_hour": 0.6,
                 "comments_per_hour": 1.5,
-                "active_hours": [8, 9, 10, 11, 12, 13, 18, 19, 20, 21, 22, 23],  # 上午+晚间
+                "active_hours": [8, 9, 10, 11, 12, 13, 18, 19, 20, 21, 22, 23],  # Sáng+buổi tối
                 "response_delay_min": 1,
                 "response_delay_max": 15,
                 "sentiment_bias": 0.0,
@@ -962,12 +975,12 @@ class SimulationConfigGenerator:
                 "influence_weight": 0.8
             }
         elif entity_type in ["alumni"]:
-            # 校友：晚间为主
+            # Cựu sinh viên: Chủ yếu buổi tối
             return {
                 "activity_level": 0.6,
                 "posts_per_hour": 0.4,
                 "comments_per_hour": 0.8,
-                "active_hours": [12, 13, 19, 20, 21, 22, 23],  # 午休+晚间
+                "active_hours": [12, 13, 19, 20, 21, 22, 23],  # Nghỉ trưa+buổi tối
                 "response_delay_min": 5,
                 "response_delay_max": 30,
                 "sentiment_bias": 0.0,
@@ -975,12 +988,12 @@ class SimulationConfigGenerator:
                 "influence_weight": 1.0
             }
         else:
-            # 普通人：晚间高峰
+            # Người thường: Cao điểm buổi tối
             return {
                 "activity_level": 0.7,
                 "posts_per_hour": 0.5,
                 "comments_per_hour": 1.2,
-                "active_hours": [9, 10, 11, 12, 13, 18, 19, 20, 21, 22, 23],  # 白天+晚间
+                "active_hours": [9, 10, 11, 12, 13, 18, 19, 20, 21, 22, 23],  # Ban ngày+buổi tối
                 "response_delay_min": 2,
                 "response_delay_max": 20,
                 "sentiment_bias": 0.0,
